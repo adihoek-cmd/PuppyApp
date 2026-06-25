@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#fffbeb" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Puppy Log" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>Puppy Log</title>
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="manifest" href="manifest.webmanifest" />
+
+<!-- ============================================================= -->
+<!-- STEP 1: paste your Firebase web config between the braces below -->
+<!-- (Firebase console > Project settings > Your apps > Web app)     -->
+<!-- ============================================================= -->
+<script>
+  window.PUPPY_CONFIG = {
+    firebase: {
+      apiKey: "AIzaSyCNos9E0IfVemiQhrKfbcUnSXPLtLkzBqQ",
+      authDomain: "puppy-log-b5560.firebaseapp.com",
+      projectId: "puppy-log-b5560",
+      storageBucket: "puppy-log-b5560.firebasestorage.app",
+      messagingSenderId: "777678885244",
+      appId: "1:777678885244:web:fbd07b24ade4e016ff14f9"
+    }
+  };
+</script>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  html, body { -webkit-tap-highlight-color: transparent; }
+  body { overscroll-behavior-y: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const cfg = window.PUPPY_CONFIG || {};
+const NEEDS_SETUP = !cfg.firebase || /PASTE|YOUR_/.test(JSON.stringify(cfg.firebase || {}));
+
+let db = null, auth = null, FieldDelete = null;
+if (!NEEDS_SETUP) {
+  firebase.initializeApp(cfg.firebase);
+  auth = firebase.auth();
+  db = firebase.firestore();
+  FieldDelete = firebase.firestore.FieldValue.delete();
+}
+
+// ---- built-in event types (Meds is now a custom event instead) ----
+const TYPES = {
+  pee:      { glyph: "💧", label: "No.1", full: "Wee",      main: true,  btn: "bg-yellow-400 text-yellow-950 active:bg-yellow-500",   tint: "bg-yellow-50 text-yellow-800", hex: "#facc15" },
+  poop:     { glyph: "💩", label: "No.2", full: "Poo",      main: true,  btn: "bg-amber-700 text-amber-50 active:bg-amber-800",       tint: "bg-amber-50 text-amber-800",   hex: "#b45309" },
+  walk:     { glyph: "🐾", label: "Walk", full: "Walk",     main: true,  btn: "bg-emerald-500 text-emerald-50 active:bg-emerald-600", tint: "bg-emerald-50 text-emerald-800", hex: "#10b981" },
+  training: { glyph: "🦴", label: "Train", full: "Training", main: false, btn: "bg-violet-500 text-violet-50 active:bg-violet-600",    tint: "bg-violet-50 text-violet-700", hex: "#8b5cf6" },
+};
+
+// colour choices for custom events (literal classes so Tailwind CDN picks them up)
+const SWATCHES = {
+  sky:    { btn: "bg-sky-500 text-sky-50 active:bg-sky-600",          tint: "bg-sky-50 text-sky-700",       hex: "#0ea5e9" },
+  rose:   { btn: "bg-rose-500 text-rose-50 active:bg-rose-600",       tint: "bg-rose-50 text-rose-700",     hex: "#f43f5e" },
+  indigo: { btn: "bg-indigo-500 text-indigo-50 active:bg-indigo-600", tint: "bg-indigo-50 text-indigo-700", hex: "#6366f1" },
+  teal:   { btn: "bg-teal-500 text-teal-50 active:bg-teal-600",       tint: "bg-teal-50 text-teal-700",     hex: "#14b8a6" },
+  orange: { btn: "bg-orange-500 text-orange-50 active:bg-orange-600", tint: "bg-orange-50 text-orange-700", hex: "#f97316" },
+  pink:   { btn: "bg-pink-500 text-pink-50 active:bg-pink-600",       tint: "bg-pink-50 text-pink-700",     hex: "#ec4899" },
+};
+const SWATCH_KEYS = Object.keys(SWATCHES);
+const EMOJI_SUGGEST = ["💊", "🍖", "🛁", "🏥", "💉", "🦷", "🧼", "🦮", "🐕", "🍗", "😴", "🪮"];
+
+function resolveType(typeId, customTypes) {
+  if (TYPES[typeId]) return TYPES[typeId];
+  const c = (customTypes || []).find((x) => x.id === typeId);
+  if (c) return { glyph: c.glyph, full: c.name, label: c.name, ...(SWATCHES[c.color] || SWATCHES.sky) };
+  return { glyph: "•", full: "Other", label: "Other", ...SWATCHES.sky };
+}
+
+// ---- time helpers ----
+function ago(ts, now) {
+  const s = Math.max(0, Math.floor((now - ts) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60); if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? h + "h " + rm + "m ago" : h + "h ago";
+  const d = Math.floor(h / 24); return d === 1 ? "1 day ago" : d + " days ago";
+}
+const clockTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const dayKey = (ts) => { const d = new Date(ts); return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate(); };
+function dayLabel(ts, now) {
+  if (dayKey(ts) === dayKey(now)) return "Today";
+  if (dayKey(ts) === dayKey(now - 86400000)) return "Yesterday";
+  return new Date(ts).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+function toLocalInput(ts) {
+  const d = new Date(ts), p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+const fromLocalInput = (s) => new Date(s).getTime();
+
+// ============================ ROOT ============================
+function App() {
+  if (NEEDS_SETUP) return <SetupScreen />;
+
+  const [authed, setAuthed] = useState(false);
+  const [authError, setAuthError] = useState(null);
+  const [family, setFamily] = useState(() => localStorage.getItem("puppy-family") || "");
+
+  useEffect(() => {
+    auth.signInAnonymously().catch((e) => setAuthError(e.message));
+    return auth.onAuthStateChanged((u) => setAuthed(!!u));
+  }, []);
+
+  if (authError) return <Splash text={"Couldn't connect: " + authError} />;
+  if (!authed) return <Splash text="Connecting…" />;
+  if (!family) return <FamilyGate onJoin={(c) => { localStorage.setItem("puppy-family", c); setFamily(c); }} />;
+
+  return <Tracker family={family} onLeave={() => { localStorage.removeItem("puppy-family"); setFamily(""); }} />;
+}
+
+function Splash({ text }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-orange-50 px-6 text-center text-amber-700">
+      <div><div className="text-4xl mb-2 animate-pulse">🐶</div><div className="text-sm font-medium">{text}</div></div>
+    </div>
+  );
+}
+
+function SetupScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-amber-50 to-emerald-50 px-6">
+      <div className="max-w-sm rounded-3xl bg-white p-6 shadow-lg">
+        <div className="text-4xl mb-3">🐶</div>
+        <h1 className="text-xl font-extrabold text-stone-800">Almost there</h1>
+        <p className="mt-2 text-sm text-stone-600">Paste your Firebase config into the top of <code className="rounded bg-stone-100 px-1">index.html</code>, then reload. The README has the full step-by-step.</p>
+      </div>
+    </div>
+  );
+}
+
+function FamilyGate({ onJoin }) {
+  const [code, setCode] = useState("");
+  const norm = code.trim().toLowerCase().replace(/\s+/g, "-");
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-amber-50 to-emerald-50 px-6">
+      <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-lg">
+        <div className="text-4xl mb-3">🐶</div>
+        <h1 className="text-xl font-extrabold text-stone-800">Your family code</h1>
+        <p className="mt-2 text-sm text-stone-600">Pick a secret code and have everyone in the family enter the <b>same one</b> — it's your shared, private log.</p>
+        <input value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && norm && onJoin(norm)}
+          placeholder="e.g. rex-house-2026" autoFocus
+          className="mt-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-3 text-base outline-none focus:border-amber-400" />
+        <button onClick={() => norm && onJoin(norm)} disabled={!norm}
+          className="mt-3 w-full rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700 disabled:opacity-40">
+          Start logging
+        </button>
+        <p className="mt-3 text-xs text-stone-400">Saved on this device so you won't retype it.</p>
+      </div>
+    </div>
+  );
+}
+
+// ============================ TRACKER ============================
+function Tracker({ family, onLeave }) {
+  const [events, setEvents] = useState([]);
+  const [config, setConfig] = useState({ puppyName: "our puppy", customTypes: [] });
+  const [who, setWho] = useState(() => localStorage.getItem("puppy-who") || "");
+  const [tab, setTab] = useState("log");
+  const [now, setNow] = useState(Date.now());
+  const [editTarget, setEditTarget] = useState(null);
+  const [editingPuppy, setEditingPuppy] = useState(false);
+  const [editingWho, setEditingWho] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [showCustom, setShowCustom] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const famRef = db.collection("families").doc(family);
+
+  useEffect(() => {
+    const unsubEv = famRef.collection("events").orderBy("ts", "desc").onSnapshot((snap) => {
+      setEvents(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    const unsubCfg = famRef.collection("meta").doc("config").onSnapshot((d) => {
+      const data = d.exists ? d.data() : {};
+      setConfig({ puppyName: data.puppyName || "our puppy", customTypes: data.customTypes || [] });
+    });
+    return () => { unsubEv(); unsubCfg(); };
+  }, [family]);
+
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(id); }, []);
+
+  // ---- writes ----
+  const addEvent = (type) => {
+    const data = { type, ts: Date.now(), by: who || "Someone" };
+    famRef.collection("events").add(data);
+  };
+  const saveEvent = ({ id, type, ts, durationMin }) => {
+    if (id) {
+      const data = { type, ts };
+      data.durationMin = type === "walk" && durationMin ? durationMin : FieldDelete;
+      famRef.collection("events").doc(id).update(data);
+    } else {
+      const data = { type, ts, by: who || "Someone" };
+      if (type === "walk" && durationMin) data.durationMin = durationMin;
+      famRef.collection("events").add(data);
+    }
+  };
+  const removeEvent = (id) => famRef.collection("events").doc(id).delete();
+
+  const setPuppyName = (n) => famRef.collection("meta").doc("config").set({ puppyName: n }, { merge: true });
+  const addCustomType = (t) => famRef.collection("meta").doc("config").set({ customTypes: [...config.customTypes, t] }, { merge: true });
+  const removeCustomType = (id) => famRef.collection("meta").doc("config").set({ customTypes: config.customTypes.filter((c) => c.id !== id) }, { merge: true });
+
+  const savePuppyName = () => { const n = draftName.trim() || "our puppy"; setPuppyName(n); setEditingPuppy(false); };
+  const saveWho = (name) => { const n = name.trim(); if (!n) return; setWho(n); setEditingWho(false); localStorage.setItem("puppy-who", n); };
+
+  const { puppyName, customTypes } = config;
+  const rt = (typeId) => resolveType(typeId, customTypes);
+
+  // ---- derived ----
+  const lastOf = (type) => events.find((e) => e.type === type);
+  const todayCount = (type) => events.filter((e) => e.type === type && dayKey(e.ts) === dayKey(now)).length;
+
+  const grouped = [];
+  let cur = null;
+  events.forEach((e) => {
+    const lbl = dayLabel(e.ts, now);
+    if (!cur || cur.label !== lbl) { cur = { label: lbl, items: [] }; grouped.push(cur); }
+    cur.items.push(e);
+  });
+
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
+    const k = dayKey(d.getTime());
+    const de = events.filter((e) => dayKey(e.ts) === k);
+    days.push({
+      label: d.toLocaleDateString([], { weekday: "short" }),
+      pee: de.filter((e) => e.type === "pee").length,
+      poop: de.filter((e) => e.type === "poop").length,
+      walk: de.filter((e) => e.type === "walk").length,
+      training: de.filter((e) => e.type === "training").length,
+      walkMin: de.filter((e) => e.type === "walk").reduce((s, e) => s + (e.durationMin || 0), 0),
+      other: de.filter((e) => !TYPES[e.type]).length,
+    });
+  }
+  const sum = (k) => days.reduce((s, d) => s + d[k], 0);
+  const stats = { pee: (sum("pee") / 7).toFixed(1), poop: (sum("poop") / 7).toFixed(1), walk: sum("walk"), walkMin: sum("walkMin"), training: sum("training"), other: sum("other") };
+
+  const byHour = Array.from({ length: 24 }, () => ({ pee: 0, poop: 0 }));
+  events.forEach((e) => { if (e.type === "pee" || e.type === "poop") byHour[new Date(e.ts).getHours()][e.type]++; });
+
+  const secondary = ["training", ...customTypes.map((c) => c.id)];
+  const summaryTypes = ["pee", "poop", "walk", "training", ...customTypes.map((c) => c.id)];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-amber-50 via-orange-50 to-emerald-50 text-stone-800">
+      <div className="mx-auto max-w-md px-4 py-5" style={{ paddingTop: "max(1.25rem, env(safe-area-inset-top))" }}>
+
+        {/* Header */}
+        <header className="flex items-start justify-between gap-3 mb-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-amber-700">
+              <span className="text-xs">🐾</span>
+              <span className="text-xs font-semibold uppercase tracking-wider">Puppy log</span>
+            </div>
+            {editingPuppy ? (
+              <div className="flex items-center gap-1.5 mt-1">
+                <input autoFocus value={draftName} onChange={(e) => setDraftName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && savePuppyName()}
+                  placeholder="Puppy's name" className="w-40 rounded-lg border border-amber-300 bg-white px-2 py-1 text-lg font-bold outline-none focus:border-amber-500" />
+                <button onClick={savePuppyName} className="rounded-lg bg-amber-600 px-2 py-1 text-sm font-bold text-white active:bg-amber-700">OK</button>
+              </div>
+            ) : (
+              <button onClick={() => { setDraftName(puppyName === "our puppy" ? "" : puppyName); setEditingPuppy(true); }} className="group flex items-center gap-1.5 mt-0.5">
+                <h1 className="text-2xl font-extrabold leading-tight truncate">{puppyName}</h1>
+                <span className="text-xs text-stone-400 group-active:text-stone-600">✏️</span>
+              </button>
+            )}
+          </div>
+          <button onClick={() => setShowSettings(true)} className="shrink-0 rounded-full bg-white/70 px-3 py-2 text-stone-500 shadow-sm active:bg-white" aria-label="Settings">⚙️</button>
+        </header>
+
+        {/* Who */}
+        <div className="mb-4 flex items-center gap-2 text-sm">
+          <span className="text-stone-400">👤</span>
+          {who && !editingWho ? (
+            <span className="text-stone-600">Logging as <button onClick={() => setEditingWho(true)} className="font-semibold text-amber-700 underline decoration-dotted underline-offset-2">{who}</button></span>
+          ) : (<WhoPicker onPick={saveWho} initial={who} />)}
+          <span className="ml-auto flex items-center gap-1 text-xs text-emerald-600"><span className="inline-block h-2 w-2 rounded-full bg-emerald-500"></span>Live</span>
+        </div>
+
+        {/* Tabs */}
+        <div className="mb-4 grid grid-cols-2 gap-1 rounded-2xl bg-white/60 p-1 shadow-sm">
+          {[["log", "📋 Log"], ["charts", "📊 Charts"]].map(([id, lbl]) => (
+            <button key={id} onClick={() => setTab(id)} className={"rounded-xl py-2 text-sm font-semibold transition-colors " + (tab === id ? "bg-white text-amber-700 shadow-sm" : "text-stone-500")}>{lbl}</button>
+          ))}
+        </div>
+
+        {tab === "log" ? (
+          <>
+            {/* Status strip */}
+            <div className="grid grid-cols-3 gap-2 mb-5">
+              {["pee", "poop", "walk"].map((t) => {
+                const last = lastOf(t);
+                return (
+                  <div key={t} className={"rounded-2xl p-3 " + TYPES[t].tint}>
+                    <div className="text-xl leading-none">{TYPES[t].glyph}</div>
+                    <div className="mt-1 text-[11px] font-medium uppercase tracking-wide opacity-70">Last {TYPES[t].full.toLowerCase()}</div>
+                    <div className="text-sm font-bold leading-tight">{last ? ago(last.ts, now) : "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Main pads */}
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              {["pee", "poop", "walk"].map((t) => (
+                <button key={t} onClick={() => addEvent(t)} className={"flex flex-col items-center justify-center rounded-3xl py-6 shadow-md transition-transform active:scale-95 " + TYPES[t].btn}>
+                  <span className="text-4xl">{TYPES[t].glyph}</span>
+                  <span className="mt-1.5 text-sm font-extrabold">{TYPES[t].label}</span>
+                  <span className="text-[11px] font-medium opacity-80">{TYPES[t].full}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Secondary + custom pads */}
+            <div className="mb-5 flex flex-wrap gap-2">
+              {secondary.map((t) => {
+                const T = rt(t);
+                return (
+                  <button key={t} onClick={() => addEvent(t)} className={"flex flex-1 min-w-[30%] items-center justify-center gap-2 rounded-2xl py-3 shadow-sm transition-transform active:scale-95 " + T.btn}>
+                    <span className="text-lg">{T.glyph}</span><span className="text-sm font-bold">{T.full}</span>
+                  </button>
+                );
+              })}
+              <button onClick={() => setShowCustom(true)} className="flex flex-1 min-w-[30%] items-center justify-center gap-1 rounded-2xl border-2 border-dashed border-stone-300 py-3 text-sm font-semibold text-stone-400 active:bg-white/60">＋ Custom</button>
+            </div>
+
+            {/* Today */}
+            <div className="mb-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl bg-white/60 py-2.5 px-3 text-sm font-semibold text-stone-600 shadow-sm">
+              <span className="text-xs uppercase tracking-wide text-stone-400">Today</span>
+              {summaryTypes.map((t) => (
+                <span key={t} className="flex items-center gap-1"><span>{rt(t).glyph}</span><span className="tabular-nums">{todayCount(t)}</span></span>
+              ))}
+            </div>
+
+            {/* History */}
+            <section>
+              <div className="mb-2 flex items-center justify-between px-1">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-stone-400">History</h2>
+                <button onClick={() => setEditTarget({ isNew: true, type: "pee", ts: Date.now() })} className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-amber-700 shadow-sm active:bg-amber-50">＋ Add entry</button>
+              </div>
+              {events.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-stone-300 bg-white/50 px-4 py-8 text-center text-sm text-stone-500">No entries yet. Tap a button when {puppyName} goes — everyone in the family sees it here.</div>
+              ) : (
+                <div className="space-y-4">
+                  {grouped.map((g) => (
+                    <div key={g.label}>
+                      <div className="mb-1.5 px-1 text-xs font-bold text-stone-500">{g.label}</div>
+                      <ul className="overflow-hidden rounded-2xl bg-white/80 shadow-sm divide-y divide-stone-100">
+                        {g.items.map((e) => {
+                          const T = rt(e.type);
+                          return (
+                            <li key={e.id}>
+                              <button onClick={() => setEditTarget(e)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-stone-50">
+                                <span className="text-lg">{T.glyph}</span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-sm font-semibold text-stone-700">
+                                    {T.full}
+                                    {e.type === "walk" && e.durationMin ? <span className="ml-1.5 text-xs font-medium text-emerald-600">· {e.durationMin} min</span> : null}
+                                    <span className="ml-2 text-xs font-normal text-stone-400">{e.by}</span>
+                                  </div>
+                                </div>
+                                <span className="shrink-0 text-sm font-medium tabular-nums text-stone-500">{clockTime(e.ts)}</span>
+                                <span className="shrink-0 text-xs text-stone-300">✏️</span>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        ) : (
+          <ChartsView days={days} stats={stats} byHour={byHour} hasData={events.length > 0} />
+        )}
+
+        <footer className="mt-6 pb-6 text-center text-[11px] text-stone-400">Family code: <b>{family}</b> · synced live</footer>
+      </div>
+
+      {editTarget && (
+        <EditSheet target={editTarget} customTypes={customTypes}
+          onClose={() => setEditTarget(null)}
+          onSave={(data) => { saveEvent(data); setEditTarget(null); }}
+          onDelete={editTarget.isNew ? null : () => { removeEvent(editTarget.id); setEditTarget(null); }} />
+      )}
+      {showCustom && (
+        <CustomSheet customTypes={customTypes} onAdd={addCustomType} onRemove={removeCustomType} onClose={() => setShowCustom(false)} />
+      )}
+      {showSettings && (
+        <SettingsSheet family={family} onLeave={onLeave} onClose={() => setShowSettings(false)} />
+      )}
+    </div>
+  );
+}
+
+// ============================ CHARTS ============================
+function ChartsView({ days, stats, byHour, hasData }) {
+  if (!hasData) {
+    return <div className="rounded-2xl border border-dashed border-stone-300 bg-white/50 px-4 py-10 text-center text-sm text-stone-500">Charts appear once you've logged a few entries.</div>;
+  }
+  const cards = [
+    { txt: stats.pee + "/day", glyph: "💧" }, { txt: stats.poop + "/day", glyph: "💩" },
+    { txt: stats.walk + " walks", glyph: "🐾" }, { txt: stats.walkMin + " min", glyph: "⏱️" },
+    { txt: stats.training + " train", glyph: "🦴" }, { txt: stats.other + " custom", glyph: "⭐" },
+  ];
+  const maxDay = Math.max(1, ...days.map((d) => d.pee + d.poop + d.walk));
+  const maxHour = Math.max(1, ...byHour.map((h) => h.pee + h.poop));
+  const DH = 130, HH = 84;
+  const seg = (n, max, H) => Math.round((n / max) * H);
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-stone-400">Last 7 days</h2>
+        <div className="grid grid-cols-3 gap-2">
+          {cards.map((s, i) => (
+            <div key={i} className="rounded-2xl bg-white/80 p-3 text-center shadow-sm">
+              <div className="text-lg leading-none">{s.glyph}</div>
+              <div className="mt-1 text-sm font-bold tabular-nums text-stone-700">{s.txt}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white/80 p-4 shadow-sm">
+        <h3 className="mb-3 text-sm font-bold text-stone-700">Daily activity</h3>
+        <div className="flex items-end gap-1.5" style={{ height: DH }}>
+          {days.map((d, i) => (
+            <div key={i} className="flex flex-1 flex-col-reverse overflow-hidden rounded-md" style={{ minHeight: 2 }}>
+              {d.pee ? <div className="bg-yellow-400" style={{ height: seg(d.pee, maxDay, DH) }} /> : null}
+              {d.poop ? <div className="bg-amber-700" style={{ height: seg(d.poop, maxDay, DH) }} /> : null}
+              {d.walk ? <div className="bg-emerald-500" style={{ height: seg(d.walk, maxDay, DH) }} /> : null}
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 flex gap-1.5">
+          {days.map((d, i) => <div key={i} className="flex-1 text-center text-[10px] text-stone-400">{d.label}</div>)}
+        </div>
+        <Legend items={[["💧 Wee", "#facc15"], ["💩 Poo", "#b45309"], ["🐾 Walk", "#10b981"]]} />
+      </div>
+
+      <div className="rounded-2xl bg-white/80 p-4 shadow-sm">
+        <h3 className="text-sm font-bold text-stone-700">Potty by hour</h3>
+        <p className="mb-3 text-xs text-stone-400">When he usually goes — handy for getting ahead of accidents.</p>
+        <div className="flex items-end gap-px" style={{ height: HH }}>
+          {byHour.map((h, i) => (
+            <div key={i} className="flex flex-1 flex-col-reverse overflow-hidden rounded-sm" style={{ minHeight: 1 }}>
+              {h.pee ? <div className="bg-yellow-400" style={{ height: seg(h.pee, maxHour, HH) }} /> : null}
+              {h.poop ? <div className="bg-amber-700" style={{ height: seg(h.poop, maxHour, HH) }} /> : null}
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 flex gap-px">
+          {byHour.map((_, i) => <div key={i} className="flex-1 text-center text-[8px] text-stone-300">{i % 6 === 0 ? i : ""}</div>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+function Legend({ items }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-3">
+      {items.map(([lbl, c]) => (
+        <span key={lbl} className="flex items-center gap-1 text-[11px] text-stone-500"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c }} />{lbl}</span>
+      ))}
+    </div>
+  );
+}
+
+// ============================ SHEETS ============================
+function Sheet({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={onClose}>
+      <div className="w-full max-w-md rounded-t-3xl bg-white p-5 shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-lg font-bold text-stone-800">{title}</h3>
+          <button onClick={onClose} className="rounded-full px-2 py-1 text-stone-400 active:bg-stone-100" aria-label="Close">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
+  const [type, setType] = useState(target.type || "pee");
+  const [when, setWhen] = useState(toLocalInput(target.ts || Date.now()));
+  const [dur, setDur] = useState(target.durationMin || "");
+  const isNew = !!target.isNew;
+  const all = ["pee", "poop", "walk", "training", ...customTypes.map((c) => c.id)];
+  const save = () => onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), durationMin: dur ? Number(dur) : undefined });
+
+  return (
+    <Sheet title={isNew ? "Add entry" : "Edit entry"} onClose={onClose}>
+      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">What</label>
+      <div className="mb-4 flex flex-wrap gap-1.5">
+        {all.map((t) => {
+          const T = resolveType(t, customTypes);
+          return (
+            <button key={t} onClick={() => setType(t)} className={"flex items-center gap-1 rounded-xl px-3 py-2 text-xs font-semibold transition-colors " + (type === t ? T.btn : "bg-stone-100 text-stone-500")}>
+              <span className="text-base">{T.glyph}</span>{T.full}
+            </button>
+          );
+        })}
+      </div>
+
+      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">When</label>
+      <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400" />
+
+      {type === "walk" && (
+        <>
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Walk length</label>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {[10, 20, 30, 45, 60].map((m) => (
+              <button key={m} onClick={() => setDur(m)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dur) === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m} min</button>
+            ))}
+          </div>
+          <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
+        </>
+      )}
+
+      <div className="mt-2 flex items-center gap-2">
+        <button onClick={save} className="flex-1 rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">{isNew ? "Add" : "Save changes"}</button>
+        {onDelete && <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete">🗑️</button>}
+      </div>
+    </Sheet>
+  );
+}
+
+function CustomSheet({ customTypes, onAdd, onRemove, onClose }) {
+  const [name, setName] = useState("");
+  const [glyph, setGlyph] = useState("💊");
+  const [color, setColor] = useState("sky");
+  const add = () => {
+    const n = name.trim(); if (!n) return;
+    onAdd({ id: "c_" + Date.now().toString(36), name: n, glyph: glyph || "⭐", color });
+    setName(""); setGlyph("💊"); setColor("sky");
+  };
+  return (
+    <Sheet title="Custom events" onClose={onClose}>
+      {customTypes.length > 0 && (
+        <div className="mb-4 space-y-1.5">
+          {customTypes.map((c) => (
+            <div key={c.id} className="flex items-center gap-2 rounded-xl bg-stone-50 px-3 py-2">
+              <span className="text-lg">{c.glyph}</span>
+              <span className="flex-1 text-sm font-semibold text-stone-700">{c.name}</span>
+              <button onClick={() => onRemove(c.id)} className="text-xs text-stone-400 active:text-red-500">remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">New event</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (e.g. Meds, Bath, Vet)" className="mb-3 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400" />
+
+      <div className="mb-3 flex items-center gap-2">
+        <input value={glyph} onChange={(e) => setGlyph(e.target.value)} maxLength={2} className="w-14 rounded-xl border border-stone-200 bg-white py-2.5 text-center text-xl outline-none focus:border-amber-400" />
+        <div className="flex flex-wrap gap-1">
+          {EMOJI_SUGGEST.map((em) => (
+            <button key={em} onClick={() => setGlyph(em)} className={"rounded-lg px-1.5 py-1 text-lg " + (glyph === em ? "bg-amber-100" : "bg-stone-50")}>{em}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-4 flex gap-2">
+        {SWATCH_KEYS.map((k) => (
+          <button key={k} onClick={() => setColor(k)} className={"h-8 w-8 rounded-full " + SWATCHES[k].btn.split(" ")[0] + (color === k ? " ring-2 ring-offset-2 ring-stone-400" : "")} aria-label={k} />
+        ))}
+      </div>
+
+      <button onClick={add} disabled={!name.trim()} className="w-full rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700 disabled:opacity-40">Add event</button>
+      <p className="mt-3 text-xs text-stone-400">Custom events are shared with the whole family.</p>
+    </Sheet>
+  );
+}
+
+function SettingsSheet({ family, onLeave, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard && navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+  return (
+    <Sheet title="Settings" onClose={onClose}>
+      <div className="mb-4">
+        <div className="text-xs font-semibold uppercase tracking-wide text-stone-400">Family code</div>
+        <div className="mt-1 flex items-center gap-2">
+          <code className="flex-1 rounded-lg bg-stone-100 px-3 py-2 text-sm font-bold text-stone-700">{family}</code>
+          <button onClick={copy} className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-700 active:bg-amber-200">{copied ? "Copied" : "Copy"}</button>
+        </div>
+        <p className="mt-1.5 text-xs text-stone-400">Share this code so others join the same log.</p>
+      </div>
+      <button onClick={onLeave} className="w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">Switch family / sign out of this log</button>
+    </Sheet>
+  );
+}
+
+function WhoPicker({ onPick, initial }) {
+  const [val, setVal] = useState(initial || "");
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {["Mum", "Dad", "Me"].map((n) => (
+        <button key={n} onClick={() => onPick(n)} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700 shadow-sm active:bg-amber-50">{n}</button>
+      ))}
+      <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onPick(val)} placeholder="or your name" className="w-24 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs outline-none focus:border-amber-400" />
+      {val.trim() && <button onClick={() => onPick(val)} className="rounded-full bg-amber-600 px-2.5 py-1 text-xs font-semibold text-white active:bg-amber-700">Set</button>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
