@@ -36,7 +36,9 @@ This lets only signed-in app users read/write, under your family's code. Good fo
 ## Part B — GitHub Pages (the free hosting)
 
 You're uploading **all** of these files together (keep them in the same folder):
-`index.html`, `manifest.webmanifest`, `icon-512.png`, `icon-192.png`, `apple-touch-icon.png`, `favicon-32.png`.
+`index.html`, `app.js`, `manifest.webmanifest`, `icon-512.png`, `icon-192.png`, `apple-touch-icon.png`, `favicon-32.png`.
+
+(The app logic lives in `app.js`; `index.html` only holds your Firebase config. Future updates ship as a new `app.js`, so you won't re-paste your config again.)
 
 **Option 1 — point and click**
 1. Create a new repo at **github.com/new** (e.g. `puppy-log`). Make it **Public** (Pages is free for public repos).
