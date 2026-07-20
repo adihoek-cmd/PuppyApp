@@ -74,6 +74,16 @@ That's it — taps on any phone show up on all of them within a second.
 
 Edit `index.html`, commit to GitHub, and Pages redeploys in about a minute. Your data lives in Firebase, so updating the page never touches the log.
 
+### Editing the app code
+
+The readable source is **`app.jsx`**; the browser runs the compiled **`app.js`**. To change the app, edit `app.jsx`, then rebuild with one command (needs Node.js installed):
+
+```
+npx esbuild app.jsx --minify --format=iife --target=es2017 --outfile=app.js
+```
+
+Commit **both** files. `index.html` loads `app.js` and holds your Firebase config, so it doesn't need to change when you rebuild — your keys stay put. React, ReactDOM, and Firebase are loaded from CDNs by `index.html`, so `app.jsx` has no imports and the build needs no other setup.
+
 ## Notes
 
 - Free-tier limits (Firestore + Pages) are far beyond what a family puppy log will ever use.
