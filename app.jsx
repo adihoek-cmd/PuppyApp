@@ -321,7 +321,7 @@ function Tracker({ family, onLeave }) {
     famRef.collection("events").add(data);
     endSleepIfActive(data.ts);
   };
-  const saveEvent = ({ id, type, ts, end, durationMin, indoor }) => {
+  const saveEvent = ({ id, type, ts, end, durationMin, place }) => {
     if (type === "sleep") {
       if (id) {
         const data = { type, ts };
@@ -335,15 +335,17 @@ function Tracker({ family, onLeave }) {
       return;
     }
     const isPotty = type === "pee" || type === "poop";
+    const accident = isPotty && place && place !== "outside";
     if (id) {
       const data = { type, ts };
       data.durationMin = type === "walk" && durationMin ? durationMin : FieldDelete;
-      data.indoor = isPotty && indoor ? true : FieldDelete;
+      data.indoor = accident ? true : FieldDelete;
+      data.place = accident && place === "cave" ? "cave" : FieldDelete;
       famRef.collection("events").doc(id).update(data);
     } else {
       const data = { type, ts, by: who || "Someone" };
       if (type === "walk" && durationMin) data.durationMin = durationMin;
-      if (isPotty && indoor) data.indoor = true;
+      if (accident) { data.indoor = true; if (place === "cave") data.place = "cave"; }
       famRef.collection("events").add(data);
       endSleepIfActive(ts);
     }
@@ -395,6 +397,25 @@ function Tracker({ family, onLeave }) {
     if (!cur || cur.label !== lbl) { cur = { label: lbl, items: [] }; grouped.push(cur); }
     cur.items.push(e);
   });
+
+  // Nest activities that happened during a walk (within [walk.ts, walk.ts+duration]).
+  const walks = events.filter((e) => e.type === "walk" && e.durationMin);
+  const childOf = {}; // eventId -> walk id
+  events.forEach((e) => {
+    if (e.type === "walk" || e.type === "sleep") return;
+    let best = null;
+    walks.forEach((w) => {
+      if (e.id === w.id) return;
+      if (e.ts >= w.ts && e.ts <= w.ts + w.durationMin * 60000 && (!best || w.ts > best.ts)) best = w;
+    });
+    if (best) childOf[e.id] = best.id;
+  });
+  const childrenOf = {}; // walk id -> [child events, chronological]
+  events.forEach((e) => { if (childOf[e.id]) (childrenOf[childOf[e.id]] = childrenOf[childOf[e.id]] || []).push(e); });
+  Object.values(childrenOf).forEach((arr) => arr.sort((a, b) => a.ts - b.ts));
+  const placeBadge = (e) => e.indoor ? (e.place === "cave"
+    ? <span className="ml-1.5 rounded bg-orange-50 px-1.5 py-0.5 text-[11px] font-semibold text-orange-700">🛖 dog cave</span>
+    : <span className="ml-1.5 rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-600">🏠 indoors</span>) : null;
 
   const days = [];
   for (let i = 6; i >= 0; i--) {
@@ -573,7 +594,9 @@ function Tracker({ family, onLeave }) {
                       <div className="mb-1.5 px-1 text-xs font-bold text-stone-500">{g.label}</div>
                       <ul className="overflow-hidden rounded-2xl bg-white/80 shadow-sm divide-y divide-stone-100">
                         {g.items.map((e) => {
+                          if (childOf[e.id]) return null; // shown nested under its walk
                           const T = eventDisplay(e, customTypes);
+                          const kids = e.type === "walk" ? childrenOf[e.id] : null;
                           return (
                             <li key={e.id}>
                               <button onClick={() => e.type === "once" ? setOneOff(e) : setEditTarget(e)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-stone-50">
@@ -583,13 +606,30 @@ function Tracker({ family, onLeave }) {
                                     {T.full}
                                     {e.type === "walk" && e.durationMin ? <span className="ml-1.5 text-xs font-medium text-emerald-600">· {e.durationMin} min</span> : null}
                                     {e.type === "sleep" ? (e.end ? <span className="ml-1.5 text-xs font-medium text-indigo-600">· {fmtDur(e.end - e.ts)}</span> : <span className="ml-1.5 text-xs font-medium text-indigo-500">· sleeping…</span>) : null}
-                                    {e.indoor ? <span className="ml-1.5 rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-600">🏠 indoors</span> : null}
+                                    {placeBadge(e)}
                                     <span className="ml-2 text-xs font-normal text-stone-400">{e.by}</span>
                                   </div>
                                 </div>
                                 <span className="shrink-0 text-sm font-medium tabular-nums text-stone-500">{clockTime(e.ts)}</span>
                                 <span className="shrink-0 text-xs text-stone-300">✏️</span>
                               </button>
+                              {kids && kids.length ? (
+                                <div className="ml-6 border-l-2 border-emerald-200 pb-1">
+                                  {kids.map((c) => {
+                                    const CT = eventDisplay(c, customTypes);
+                                    return (
+                                      <button key={c.id} onClick={() => c.type === "once" ? setOneOff(c) : setEditTarget(c)} className="flex w-full items-center gap-2 py-1.5 pl-3 pr-3 text-left active:bg-stone-50">
+                                        <span className="text-base">{CT.glyph}</span>
+                                        <div className="min-w-0 flex-1">
+                                          <span className="text-sm font-medium text-stone-600">{CT.full}</span>
+                                          {placeBadge(c)}
+                                        </div>
+                                        <span className="shrink-0 text-xs font-medium tabular-nums text-stone-400">{clockTime(c.ts)}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
                             </li>
                           );
                         })}
@@ -993,7 +1033,7 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
   const [when, setWhen] = useState(toLocalInput(target.ts || Date.now()));
   const [endWhen, setEndWhen] = useState(target.end ? toLocalInput(target.end) : "");
   const [dur, setDur] = useState(target.durationMin || "");
-  const [indoor, setIndoor] = useState(!!target.indoor);
+  const [place, setPlace] = useState(target.indoor ? (target.place === "cave" ? "cave" : "house") : "outside");
   const isNew = !!target.isNew;
   const all = ["pee", "poop", "walk", "training", "sleep", ...customTypes.map((c) => c.id)];
   const isPotty = type === "pee" || type === "poop";
@@ -1002,7 +1042,7 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
     if (isSleep) {
       onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), end: endWhen ? fromLocalInput(endWhen) : undefined });
     } else {
-      onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), durationMin: dur ? Number(dur) : undefined, indoor: isPotty && indoor });
+      onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), durationMin: dur ? Number(dur) : undefined, place: isPotty ? place : undefined });
     }
   };
 
@@ -1032,12 +1072,20 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
       )}
 
       {isPotty && (
-        <button onClick={() => setIndoor(!indoor)} className={"mb-4 flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-sm font-semibold transition-colors " + (indoor ? "border-red-200 bg-red-50 text-red-600" : "border-stone-200 bg-white text-stone-500")}>
-          <span>🏠 Happened indoors (accident)</span>
-          <span className={"flex h-6 w-11 items-center rounded-full p-0.5 transition-colors " + (indoor ? "bg-red-500" : "bg-stone-300")}>
-            <span className={"h-5 w-5 rounded-full bg-white shadow transition-transform " + (indoor ? "translate-x-5" : "")} />
-          </span>
-        </button>
+        <>
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Where did it happen?</label>
+          <div className="mb-4 grid grid-cols-3 gap-1.5">
+            {[["outside", "Outside", "🌳"], ["house", "Indoors", "🏠"], ["cave", "Dog cave", "🛖"]].map(([val, lbl, em]) => {
+              const on = place === val;
+              const onCls = val === "outside" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : val === "cave" ? "border-orange-200 bg-orange-50 text-orange-700" : "border-red-200 bg-red-50 text-red-600";
+              return (
+                <button key={val} onClick={() => setPlace(val)} className={"flex flex-col items-center gap-0.5 rounded-xl border py-2 text-xs font-semibold transition-colors " + (on ? onCls : "border-stone-200 bg-white text-stone-400")}>
+                  <span className="text-lg">{em}</span>{lbl}
+                </button>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {type === "walk" && (
@@ -1048,7 +1096,8 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
               <button key={m} onClick={() => setDur(m)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dur) === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m} min</button>
             ))}
           </div>
-          <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
+          <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
+          <p className="mb-4 text-xs text-stone-400">Set the length so activities during the walk tuck underneath it.</p>
         </>
       )}
 
