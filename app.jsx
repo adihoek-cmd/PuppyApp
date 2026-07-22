@@ -381,32 +381,36 @@ function Tracker({ family, onLeave }) {
   const todayIndoor = events.filter((e) => e.indoor && dayKey(e.ts) === dayKey(now)).length;
 
   const todayK = dayKey(now);
-  let todaySleepMs = 0;
+  const sleepMsByDay = {};
   events.forEach((e) => {
     if (e.type !== "sleep") return;
     const ongoing = e.ongoing && !e.end;
     if (ongoing && now - e.ts > STUCK_MS) return; // forgotten timer — don't count until fixed
     const end = e.end || (ongoing ? now : null);
-    if (end && end > e.ts) splitByDay(e.ts, end).forEach((s) => { if (s.key === todayK) todaySleepMs += s.ms; });
+    if (end && end > e.ts) splitByDay(e.ts, end).forEach((s) => { sleepMsByDay[s.key] = (sleepMsByDay[s.key] || 0) + s.ms; });
   });
+  const todaySleepMs = sleepMsByDay[todayK] || 0;
 
   const grouped = [];
   let cur = null;
   events.forEach((e) => {
     const lbl = dayLabel(e.ts, now);
-    if (!cur || cur.label !== lbl) { cur = { label: lbl, items: [] }; grouped.push(cur); }
+    if (!cur || cur.label !== lbl) { cur = { label: lbl, key: dayKey(e.ts), items: [] }; grouped.push(cur); }
     cur.items.push(e);
   });
 
-  // Nest activities that happened during a walk (within [walk.ts, walk.ts+duration]).
-  const walks = events.filter((e) => e.type === "walk" && e.durationMin);
+  // Nest activities that happened during a walk. Walks with a length use that
+  // span; walks without one get a 10-minute grace window from their start.
+  const WALK_GRACE_MS = 10 * 60000;
+  const walks = events.filter((e) => e.type === "walk");
+  const walkEnd = (w) => w.ts + (w.durationMin ? w.durationMin * 60000 : WALK_GRACE_MS);
   const childOf = {}; // eventId -> walk id
   events.forEach((e) => {
     if (e.type === "walk" || e.type === "sleep") return;
     let best = null;
     walks.forEach((w) => {
       if (e.id === w.id) return;
-      if (e.ts >= w.ts && e.ts <= w.ts + w.durationMin * 60000 && (!best || w.ts > best.ts)) best = w;
+      if (e.ts >= w.ts && e.ts <= walkEnd(w) && (!best || w.ts > best.ts)) best = w;
     });
     if (best) childOf[e.id] = best.id;
   });
@@ -592,6 +596,7 @@ function Tracker({ family, onLeave }) {
                   {grouped.map((g) => (
                     <div key={g.label}>
                       <div className="mb-1.5 px-1 text-xs font-bold text-stone-500">{g.label}</div>
+                      <DaySummary items={g.items} sleepMs={sleepMsByDay[g.key] || 0} isToday={g.key === todayK} customTypes={customTypes} />
                       <ul className="overflow-hidden rounded-2xl bg-white/80 shadow-sm divide-y divide-stone-100">
                         {g.items.map((e) => {
                           if (childOf[e.id]) return null; // shown nested under its walk
@@ -1013,6 +1018,40 @@ function TrendsView({ events, now, puppyName }) {
   );
 }
 
+// A day's wrap-up. In the reverse-chronological list this sits at the top of the
+// day's block, which is midnight — the day's chronological end.
+function DaySummary({ items, sleepMs, isToday, customTypes }) {
+  const count = (t) => items.filter((e) => e.type === t).length;
+  const walkMin = items.filter((e) => e.type === "walk").reduce((s, e) => s + (e.durationMin || 0), 0);
+  const cave = items.filter((e) => e.indoor && e.place === "cave").length;
+  const house = items.filter((e) => e.indoor).length - cave;
+  const onceCount = items.filter((e) => e.type === "once").length;
+
+  const chips = [
+    { glyph: "💧", txt: count("pee"), always: true },
+    { glyph: "💩", txt: count("poop"), always: true },
+    { glyph: "🐾", txt: count("walk") + (walkMin ? " · " + walkMin + "m" : ""), always: true },
+    { glyph: "🦴", txt: count("training") },
+    ...customTypes.map((c) => ({ glyph: c.glyph, txt: count(c.id) })),
+    { glyph: "⭐", txt: onceCount },
+    { glyph: "😴", txt: sleepMs ? fmtDur(sleepMs) : 0 },
+  ].filter((c) => c.always || c.txt);
+
+  return (
+    <div className="mb-1.5 rounded-2xl border border-stone-200/80 bg-white/70 px-3 py-2.5 shadow-sm">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-stone-400">{isToday ? "So far today" : "Day summary"}</div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-stone-600">
+        {chips.map((c, i) => (
+          <span key={i} className="flex items-center gap-1"><span>{c.glyph}</span><span className="tabular-nums">{c.txt}</span></span>
+        ))}
+        {house > 0 ? <span className="flex items-center gap-1 text-red-600"><span>🏠</span><span className="tabular-nums">{house}</span></span> : null}
+        {cave > 0 ? <span className="flex items-center gap-1 text-orange-600"><span>🛖</span><span className="tabular-nums">{cave}</span></span> : null}
+        {house + cave === 0 ? <span className="text-xs font-medium text-emerald-600">✓ no accidents</span> : null}
+      </div>
+    </div>
+  );
+}
+
 // ============================ SHEETS ============================
 function Sheet({ title, onClose, children }) {
   return (
@@ -1092,12 +1131,12 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
         <>
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Walk length</label>
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {[10, 20, 30, 45, 60].map((m) => (
+            {[5, 10, 15, 20, 30, 45, 60].map((m) => (
               <button key={m} onClick={() => setDur(m)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dur) === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m} min</button>
             ))}
           </div>
           <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
-          <p className="mb-4 text-xs text-stone-400">Set the length so activities during the walk tuck underneath it.</p>
+          <p className="mb-4 text-xs text-stone-400">Activities during the walk tuck underneath it. Without a length, anything in the next 10 minutes counts.</p>
         </>
       )}
 
