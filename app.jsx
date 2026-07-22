@@ -9,6 +9,11 @@
  */
 const { useState, useEffect, useRef } = React;
 
+// Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
+// at a glance which build a phone is actually running (catches stale caches).
+const APP_VERSION = "1.0";
+const APP_BUILD = "22 Jul 2026";
+
 const cfg = window.PUPPY_CONFIG || {};
 const NEEDS_SETUP = !cfg.firebase || /PASTE|YOUR_/.test(JSON.stringify(cfg.firebase || {}));
 
@@ -377,8 +382,6 @@ function Tracker({ family, onLeave }) {
 
   // ---- derived ----
   const lastOf = (type) => events.find((e) => e.type === type);
-  const todayCount = (type) => events.filter((e) => e.type === type && dayKey(e.ts) === dayKey(now)).length;
-  const todayIndoor = events.filter((e) => e.indoor && dayKey(e.ts) === dayKey(now)).length;
 
   const todayK = dayKey(now);
   const sleepMsByDay = {};
@@ -401,12 +404,13 @@ function Tracker({ family, onLeave }) {
 
   // Nest activities that happened during a walk. Walks with a length use that
   // span; walks without one get a 10-minute grace window from their start.
+  // Indoor accidents never nest — by definition they didn't happen on the walk.
   const WALK_GRACE_MS = 10 * 60000;
   const walks = events.filter((e) => e.type === "walk");
   const walkEnd = (w) => w.ts + (w.durationMin ? w.durationMin * 60000 : WALK_GRACE_MS);
   const childOf = {}; // eventId -> walk id
   events.forEach((e) => {
-    if (e.type === "walk" || e.type === "sleep") return;
+    if (e.type === "walk" || e.type === "sleep" || e.indoor) return;
     let best = null;
     walks.forEach((w) => {
       if (e.id === w.id) return;
@@ -458,7 +462,6 @@ function Tracker({ family, onLeave }) {
   };
 
   const secondary = ["training", ...customTypes.map((c) => c.id)];
-  const summaryTypes = ["pee", "poop", "walk", "training", ...customTypes.map((c) => c.id)];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-amber-50 via-orange-50 to-emerald-50 text-stone-800">
@@ -572,15 +575,6 @@ function Tracker({ family, onLeave }) {
                 );
               })}
               <button onClick={() => setOneOff({ isNew: true, ts: Date.now() })} className="flex flex-1 min-w-[30%] items-center justify-center gap-1 rounded-2xl border-2 border-dashed border-stone-300 py-3 text-sm font-semibold text-stone-400 active:bg-white/60">＋ One-off</button>
-            </div>
-
-            {/* Today */}
-            <div className="mb-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl bg-white/60 py-2.5 px-3 text-sm font-semibold text-stone-600 shadow-sm">
-              <span className="text-xs uppercase tracking-wide text-stone-400">Today</span>
-              {summaryTypes.map((t) => (
-                <span key={t} className="flex items-center gap-1"><span>{rt(t).glyph}</span><span className="tabular-nums">{todayCount(t)}</span></span>
-              ))}
-              {todayIndoor > 0 ? <span className="flex items-center gap-1 text-red-600"><span>🏠</span><span className="tabular-nums">{todayIndoor}</span></span> : null}
             </div>
 
             {/* History */}
@@ -1225,6 +1219,8 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
       <p className="mb-4 text-xs text-stone-400">Saves a file with the full log to this device. Do it now and then whenever you want a snapshot.</p>
 
       <button onClick={onLeave} className="w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">Switch family / sign out of this log</button>
+
+      <div className="mt-4 text-center text-[11px] font-medium text-stone-400">🐾 Puppy Log <b className="text-stone-500">v{APP_VERSION}</b> · {APP_BUILD}</div>
     </Sheet>
   );
 }
