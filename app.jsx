@@ -11,7 +11,7 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.0";
+const APP_VERSION = "1.1";
 const APP_BUILD = "22 Jul 2026";
 
 const cfg = window.PUPPY_CONFIG || {};
@@ -368,6 +368,16 @@ function Tracker({ family, onLeave }) {
   const startSleep = () => { if (!ongoingSleep) famRef.collection("events").add({ type: "sleep", ts: Date.now(), by: who || "Someone", ongoing: true }); };
   const stopSleep = () => { if (ongoingSleep) famRef.collection("events").doc(ongoingSleep.id).update({ end: Date.now(), ongoing: FieldDelete }); };
 
+  // The most recent walk that still has no length set — "open" and endable.
+  // Capped at 3h so an old, never-timed walk doesn't offer a silly duration.
+  const WALK_OPEN_MAX_MS = 3 * 3600000;
+  const openWalk = events.find((e) => e.type === "walk" && !e.durationMin && e.ts <= now && now - e.ts < WALK_OPEN_MAX_MS);
+  const endWalk = () => {
+    if (!openWalk) return;
+    const mins = Math.max(1, Math.round((Date.now() - openWalk.ts) / 60000));
+    famRef.collection("events").doc(openWalk.id).update({ durationMin: mins });
+  };
+
   const setPuppyName = (n) => famRef.collection("meta").doc("config").set({ puppyName: n }, { merge: true });
   const removeCustomType = (id) => famRef.collection("meta").doc("config").set({ customTypes: config.customTypes.filter((c) => c.id !== id) }, { merge: true });
 
@@ -563,6 +573,13 @@ function Tracker({ family, onLeave }) {
                 </button>
               ))}
             </div>
+
+            {/* End the last untimed walk */}
+            {openWalk ? (
+              <button onClick={endWalk} className="mb-3 flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50 py-2.5 text-sm font-bold text-emerald-700 shadow-sm transition-transform active:scale-95 active:bg-emerald-100">
+                <span>⏱️</span>End previous walk · {fmtDur(now - openWalk.ts)}
+              </button>
+            ) : null}
 
             {/* Secondary + custom pads */}
             <div className="mb-5 flex flex-wrap gap-2">
