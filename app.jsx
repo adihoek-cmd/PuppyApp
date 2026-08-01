@@ -1160,7 +1160,7 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
 
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Distance</label>
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {[250, 500, 750, 1000, 1500, 2000].map((mtr) => (
+            {[100, 250, 500, 750, 1000].map((mtr) => (
               <button key={mtr} onClick={() => setDist(mtr)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dist) === mtr ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{mtr < 1000 ? mtr + " m" : (mtr / 1000) + " km"}</button>
             ))}
           </div>
