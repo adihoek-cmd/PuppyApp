@@ -11,8 +11,8 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.2";
-const APP_BUILD = "22 Jul 2026";
+const APP_VERSION = "1.3";
+const APP_BUILD = "03 Aug 2026";
 
 const cfg = window.PUPPY_CONFIG || {};
 const NEEDS_SETUP = !cfg.firebase || /PASTE|YOUR_/.test(JSON.stringify(cfg.firebase || {}));
