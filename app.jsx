@@ -11,8 +11,8 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.3";
-const APP_BUILD = "03 Aug 2026";
+const APP_VERSION = "1.4";
+const APP_BUILD = "04 Aug 2026";
 
 const cfg = window.PUPPY_CONFIG || {};
 const NEEDS_SETUP = !cfg.firebase || /PASTE|YOUR_/.test(JSON.stringify(cfg.firebase || {}));
@@ -86,6 +86,12 @@ function toLocalInput(ts) {
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
 }
 const fromLocalInput = (s) => new Date(s).getTime();
+
+// walk distance (metres) like "820 m" / "1.24 km" — written by the watch companion
+function fmtDist(m) {
+  const v = Math.max(0, Math.round(Number(m) || 0));
+  return v < 1000 ? v + " m" : (v / 1000).toFixed(2) + " km";
+}
 
 // duration like "1h 23m" / "45m" / "0m"
 function fmtDur(ms) {
@@ -332,7 +338,7 @@ function Tracker({ family, onLeave }) {
     famRef.collection("events").add(data);
     endSleepIfActive(data.ts);
   };
-  const saveEvent = ({ id, type, ts, end, durationMin, place }) => {
+  const saveEvent = ({ id, type, ts, end, durationMin, distanceM, place }) => {
     if (type === "sleep") {
       if (id) {
         const data = { type, ts };
@@ -350,12 +356,14 @@ function Tracker({ family, onLeave }) {
     if (id) {
       const data = { type, ts };
       data.durationMin = type === "walk" && durationMin ? durationMin : FieldDelete;
+      data.distanceM = type === "walk" && distanceM ? distanceM : FieldDelete;
       data.indoor = accident ? true : FieldDelete;
       data.place = accident && place === "cave" ? "cave" : FieldDelete;
       famRef.collection("events").doc(id).update(data);
     } else {
       const data = { type, ts, by: who || "Someone" };
       if (type === "walk" && durationMin) data.durationMin = durationMin;
+      if (type === "walk" && distanceM) data.distanceM = distanceM;
       if (accident) { data.indoor = true; if (place === "cave") data.place = "cave"; }
       famRef.collection("events").add(data);
       endSleepIfActive(ts);
@@ -627,6 +635,7 @@ function Tracker({ family, onLeave }) {
                                   <div className="text-sm font-semibold text-stone-700">
                                     {T.full}
                                     {e.type === "walk" && e.durationMin ? <span className="ml-1.5 text-xs font-medium text-emerald-600">· {e.durationMin} min</span> : null}
+                                    {e.type === "walk" && e.distanceM ? <span className="ml-1.5 text-xs font-medium text-emerald-600">· {fmtDist(e.distanceM)}</span> : null}
                                     {e.type === "sleep" ? (e.end ? <span className="ml-1.5 text-xs font-medium text-indigo-600">· {fmtDur(e.end - e.ts)}</span> : <span className="ml-1.5 text-xs font-medium text-indigo-500">· sleeping…</span>) : null}
                                     {placeBadge(e)}
                                     <span className="ml-2 text-xs font-normal text-stone-400">{e.by}</span>
@@ -1089,6 +1098,7 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
   const [when, setWhen] = useState(toLocalInput(target.ts || Date.now()));
   const [endWhen, setEndWhen] = useState(target.end ? toLocalInput(target.end) : "");
   const [dur, setDur] = useState(target.durationMin || "");
+  const [dist, setDist] = useState(target.distanceM || "");
   const [place, setPlace] = useState(target.indoor ? (target.place === "cave" ? "cave" : "house") : "outside");
   const isNew = !!target.isNew;
   const all = ["pee", "poop", "walk", "training", "sleep", ...customTypes.map((c) => c.id)];
@@ -1098,7 +1108,7 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
     if (isSleep) {
       onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), end: endWhen ? fromLocalInput(endWhen) : undefined });
     } else {
-      onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), durationMin: dur ? Number(dur) : undefined, place: isPotty ? place : undefined });
+      onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), durationMin: dur ? Number(dur) : undefined, distanceM: dist ? Number(dist) : undefined, place: isPotty ? place : undefined });
     }
   };
 
@@ -1154,6 +1164,14 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
           </div>
           <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
           <p className="mb-4 text-xs text-stone-400">Activities during the walk tuck underneath it. Without a length, anything in the next 10 minutes counts.</p>
+
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Distance</label>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {[100, 250, 500, 750, 1000].map((mtr) => (
+              <button key={mtr} onClick={() => setDist(mtr)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dist) === mtr ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{mtr < 1000 ? mtr + " m" : (mtr / 1000) + " km"}</button>
+            ))}
+          </div>
+          <input type="number" inputMode="numeric" value={dist} onChange={(e) => setDist(e.target.value)} placeholder="metres (optional)" className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
         </>
       )}
 
