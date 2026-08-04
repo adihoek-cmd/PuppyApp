@@ -11,7 +11,7 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.4";
+const APP_VERSION = "1.5";
 const APP_BUILD = "04 Aug 2026";
 
 const cfg = window.PUPPY_CONFIG || {};
@@ -567,11 +567,13 @@ function Tracker({ family, onLeave }) {
             <div className="grid grid-cols-3 gap-2 mb-5">
               {["pee", "poop", "walk"].map((t) => {
                 const last = lastOf(t);
+                // For a walk, measure from when it ended (start + length), not the start.
+                const refTs = last ? (t === "walk" && last.durationMin ? last.ts + last.durationMin * 60000 : last.ts) : null;
                 return (
                   <div key={t} className={"rounded-2xl p-3 " + TYPES[t].tint}>
                     <div className="text-xl leading-none">{TYPES[t].glyph}</div>
                     <div className="mt-1 text-[11px] font-medium uppercase tracking-wide opacity-70">Last {TYPES[t].full.toLowerCase()}</div>
-                    <div className="text-sm font-bold leading-tight">{last ? ago(last.ts, now) : "—"}</div>
+                    <div className="text-sm font-bold leading-tight">{refTs ? ago(refTs, now) : "—"}</div>
                   </div>
                 );
               })}
