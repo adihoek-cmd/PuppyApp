@@ -11,8 +11,18 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.5";
-const APP_BUILD = "04 Aug 2026";
+const APP_VERSION = "1.6";
+const APP_BUILD = "26 Aug 2026";
+
+// ---- poop-bag roll ----
+// State lives in its own doc (meta/bags) so nothing is ever written to the
+// events collection — the watch app and history stay completely untouched.
+// The remaining count is DERIVED: rollSize minus outside poos since startedTs,
+// plus a manual adjust offset. That means it self-corrects if a poo is edited
+// or deleted, and it decrements automatically when the watch logs a poo.
+const BAG_ROLL_SIZES = [15, 20];
+const BAG_LOW = 2;   // pill turns red at or below this
+const BAG_ALERT = 1; // big banner + notification at or below this
 
 const cfg = window.PUPPY_CONFIG || {};
 const NEEDS_SETUP = !cfg.firebase || /PASTE|YOUR_/.test(JSON.stringify(cfg.firebase || {}));
@@ -302,6 +312,10 @@ function Tracker({ family, onLeave }) {
   const [draftName, setDraftName] = useState("");
   const [oneOff, setOneOff] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [bags, setBags] = useState(null);
+  const [showBags, setShowBags] = useState(false);
+  const [bagAlertHidden, setBagAlertHidden] = useState(false);
+  const bagNotified = useRef(null);
 
   const famRef = db.collection("families").doc(family);
 
@@ -313,7 +327,10 @@ function Tracker({ family, onLeave }) {
       const data = d.exists ? d.data() : {};
       setConfig({ puppyName: data.puppyName || "our puppy", customTypes: data.customTypes || [] });
     });
-    return () => { unsubEv(); unsubCfg(); };
+    const unsubBags = famRef.collection("meta").doc("bags").onSnapshot((d) => {
+      setBags(d.exists ? d.data() : null);
+    });
+    return () => { unsubEv(); unsubCfg(); unsubBags(); };
   }, [family]);
 
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
@@ -392,6 +409,57 @@ function Tracker({ family, onLeave }) {
     famRef.collection("events").doc(openWalk.id).update({ durationMin: mins });
   };
 
+  // ---- poop bags ----
+  const bagsRef = famRef.collection("meta").doc("bags");
+  const bagSize = (bags && bags.rollSize) || BAG_ROLL_SIZES[0];
+  // A roll is only "running" once someone has actually started one.
+  const bagStarted = !!(bags && bags.startedTs && bags.rollSize);
+  const bagUsed = bagStarted
+    ? events.filter((e) => e.type === "poop" && !e.indoor && e.ts >= bags.startedTs).length
+    : 0;
+  // adjust is a manual offset on remaining: -1 = used an extra bag, +1 = put one back.
+  const bagLeft = bagStarted
+    ? Math.max(0, bags.rollSize - bagUsed + ((bags && bags.adjust) || 0))
+    : null;
+
+  const askNotifyPermission = () => {
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission();
+    } catch (err) { /* unsupported browser — banner still works */ }
+  };
+  const startRoll = (size) => {
+    askNotifyPermission();
+    bagsRef.set({ rollSize: size, startedTs: Date.now(), adjust: 0, by: who || "Someone" });
+    setBagAlertHidden(false);
+  };
+  const adjustBags = (delta) => {
+    if (!bagStarted) return;
+    bagsRef.set({ adjust: ((bags && bags.adjust) || 0) + delta }, { merge: true });
+  };
+  const setRollSize = (size) => bagsRef.set({ rollSize: size }, { merge: true });
+
+  // Fire a system notification once when we drop to the last bag, and again at zero.
+  useEffect(() => {
+    if (bagLeft === null || bagLeft > BAG_ALERT) { bagNotified.current = null; return; }
+    if (bagNotified.current === bagLeft) return;
+    bagNotified.current = bagLeft;
+    const title = bagLeft === 0 ? "🛍️ Poop bags: none left" : "🛍️ Poop bags: last one";
+    const body = bagLeft === 0 ? "The roll is empty — grab a new one." : "One bag left on the roll.";
+    const opts = { body, tag: "puppy-bags", renotify: true };
+    try {
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      // Android Chrome forbids `new Notification()`; use the service worker when there is one.
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+        navigator.serviceWorker.getRegistration().then((reg) => {
+          if (reg && reg.showNotification) reg.showNotification(title, opts);
+          else new Notification(title, opts);
+        }).catch(() => {});
+      } else {
+        new Notification(title, opts);
+      }
+    } catch (err) { /* banner is the fallback */ }
+  }, [bagLeft]);
+
   const setPuppyName = (n) => famRef.collection("meta").doc("config").set({ puppyName: n }, { merge: true });
   const removeCustomType = (id) => famRef.collection("meta").doc("config").set({ customTypes: config.customTypes.filter((c) => c.id !== id) }, { merge: true });
 
@@ -401,7 +469,7 @@ function Tracker({ family, onLeave }) {
   // Full local backup of everything currently synced for this family.
   const exportData = () => downloadJSON(
     "puppy-log-backup-" + new Date().toISOString().slice(0, 10) + ".json",
-    { app: "Puppy Log", exportedAt: new Date().toISOString(), family, puppyName, customTypes, events }
+    { app: "Puppy Log", exportedAt: new Date().toISOString(), family, puppyName, customTypes, bags, events }
   );
 
   // ---- derived ----
@@ -511,7 +579,18 @@ function Tracker({ family, onLeave }) {
               </button>
             )}
           </div>
-          <button onClick={() => setShowSettings(true)} className="shrink-0 rounded-full bg-white/70 px-3 py-2 text-stone-500 shadow-sm active:bg-white" aria-label="Settings">⚙️</button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button onClick={() => setShowBags(true)} aria-label="Poop bags"
+              className={"flex items-center gap-1 rounded-full px-2.5 py-2 text-sm font-bold shadow-sm " + (
+                bagLeft === null ? "bg-white/70 text-stone-400 active:bg-white"
+                  : bagLeft <= BAG_LOW ? "bg-red-500 text-white active:bg-red-600"
+                    : "bg-emerald-500 text-white active:bg-emerald-600")}>
+              <span>🛍️</span>
+              {bagLeft === null ? <span className="text-xs font-semibold">Start roll</span>
+                : <span className="tabular-nums">{bagLeft}</span>}
+            </button>
+            <button onClick={() => setShowSettings(true)} className="rounded-full bg-white/70 px-3 py-2 text-stone-500 shadow-sm active:bg-white" aria-label="Settings">⚙️</button>
+          </div>
         </header>
 
         {/* Who */}
@@ -529,6 +608,26 @@ function Tracker({ family, onLeave }) {
             <button key={id} onClick={() => setTab(id)} className={"rounded-xl px-1 py-2 text-xs font-semibold transition-colors " + (tab === id ? "bg-white text-amber-700 shadow-sm" : "text-stone-500")}>{lbl}</button>
           ))}
         </div>
+
+        {/* Last-bag alert */}
+        {bagLeft !== null && bagLeft <= BAG_ALERT && !bagAlertHidden && (
+          <div className="mb-4 flex items-center gap-3 rounded-2xl bg-red-600 p-4 text-white shadow-md">
+            <span className="text-3xl animate-pulse">🛍️</span>
+            <div className="min-w-0 flex-1">
+              <div className="text-base font-extrabold leading-tight">
+                {bagLeft === 0 ? "Out of poop bags" : "Last poop bag!"}
+              </div>
+              <div className="text-xs text-red-100">
+                {bagLeft === 0 ? "The roll is empty — time for a new one." : "One bag left on the roll. Grab a new one soon."}
+              </div>
+              <button onClick={() => { setShowBags(true); setBagAlertHidden(true); }}
+                className="mt-2 rounded-lg bg-white/20 px-3 py-1.5 text-xs font-bold active:bg-white/30">
+                Start a new roll
+              </button>
+            </div>
+            <button onClick={() => setBagAlertHidden(true)} className="self-start rounded-full px-1.5 text-white/70 active:text-white" aria-label="Dismiss">✕</button>
+          </div>
+        )}
 
         {tab === "log" ? (
           <>
@@ -696,8 +795,13 @@ function Tracker({ family, onLeave }) {
           onSave={(data) => { saveOneOff(data); setOneOff(null); }}
           onDelete={oneOff.isNew ? null : () => { removeEvent(oneOff.id); setOneOff(null); }} />
       )}
+      {showBags && (
+        <BagsSheet left={bagLeft} used={bagUsed} size={bagSize} started={bagStarted} startedTs={bags && bags.startedTs}
+          onStart={startRoll} onAdjust={adjustBags} onClose={() => setShowBags(false)} />
+      )}
       {showSettings && (
-        <SettingsSheet family={family} customTypes={customTypes} onRemoveCustom={removeCustomType} onExport={exportData} onLeave={onLeave} onClose={() => setShowSettings(false)} />
+        <SettingsSheet family={family} customTypes={customTypes} onRemoveCustom={removeCustomType} onExport={exportData} onLeave={onLeave}
+          bagSize={bagSize} onSetBagSize={setRollSize} onClose={() => setShowSettings(false)} />
       )}
     </div>
   );
@@ -1228,7 +1332,64 @@ function OneOffSheet({ target, onSave, onDelete, onClose }) {
   );
 }
 
-function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, onClose }) {
+function BagsSheet({ left, used, size, started, startedTs, onStart, onAdjust, onClose }) {
+  const [confirmNew, setConfirmNew] = useState(false);
+  const tone = left === null ? "text-stone-400" : left <= BAG_LOW ? "text-red-600" : "text-emerald-600";
+  return (
+    <Sheet title="Poop bags" onClose={onClose}>
+      {started ? (
+        <>
+          <div className="mb-4 rounded-2xl bg-stone-50 py-5 text-center">
+            <div className={"text-5xl font-extrabold tabular-nums " + tone}>{left}</div>
+            <div className="mt-1 text-sm font-semibold text-stone-500">
+              {left === 1 ? "bag left" : "bags left"} of {size}
+            </div>
+            <div className="mt-1 text-xs text-stone-400">
+              {used} used since {new Date(startedTs).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" })}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Correct the count</div>
+            <div className="flex gap-2">
+              <button onClick={() => onAdjust(-1)} className="flex-1 rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">−1 used a bag</button>
+              <button onClick={() => onAdjust(1)} className="flex-1 rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">+1 put one back</button>
+            </div>
+            <p className="mt-1.5 text-xs text-stone-400">Outside poos count down automatically — including ones logged on the watch. Use these only for the odd extra bag or a double-bagged poo.</p>
+          </div>
+
+          {confirmNew ? (
+            <div className="rounded-xl bg-amber-50 p-3">
+              <p className="mb-2 text-sm font-semibold text-amber-900">Start a fresh roll of {size}?</p>
+              <div className="flex gap-2">
+                <button onClick={() => { onStart(size); setConfirmNew(false); onClose(); }} className="flex-1 rounded-lg bg-amber-600 py-2.5 text-sm font-bold text-white active:bg-amber-700">Yes, new roll</button>
+                <button onClick={() => setConfirmNew(false)} className="flex-1 rounded-lg bg-white py-2.5 text-sm font-semibold text-stone-500 active:bg-stone-100">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmNew(true)} className="w-full rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">🛍️ Opened a new roll</button>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="mb-3 text-sm text-stone-600">Start a roll and every outside poo counts one bag down — from the app or the watch.</p>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-stone-400">Roll size</div>
+          <div className="flex gap-2">
+            {BAG_ROLL_SIZES.map((n) => (
+              <button key={n} onClick={() => { onStart(n); onClose(); }}
+                className="flex-1 rounded-xl bg-amber-600 py-4 text-base font-bold text-white active:bg-amber-700">
+                Start {n}
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-stone-400">You can change the roll size later in ⚙️ Settings.</p>
+        </>
+      )}
+    </Sheet>
+  );
+}
+
+function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, onClose }) {
   const [copied, setCopied] = useState(false);
   const copy = () => { navigator.clipboard && navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   return (
@@ -1257,6 +1418,21 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
           <p className="mt-1.5 text-xs text-stone-400">Removing a button keeps its past entries in history.</p>
         </div>
       )}
+
+      <div className="mb-4">
+        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Poop bag roll size</div>
+        <div className="flex gap-2">
+          {BAG_ROLL_SIZES.map((n) => (
+            <button key={n} onClick={() => onSetBagSize(n)}
+              className={"flex-1 rounded-xl border py-3 text-sm font-bold " + (bagSize === n
+                ? "border-amber-300 bg-amber-50 text-amber-700"
+                : "border-stone-200 bg-white text-stone-500 active:bg-stone-50")}>
+              {n} bags
+            </button>
+          ))}
+        </div>
+        <p className="mt-1.5 text-xs text-stone-400">Applies to the current roll too, so you can fix it if you picked the wrong size.</p>
+      </div>
 
       <button onClick={onExport} className="mb-2 w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">⬇️ Export data (JSON backup)</button>
       <p className="mb-4 text-xs text-stone-400">Saves a file with the full log to this device. Do it now and then whenever you want a snapshot.</p>
