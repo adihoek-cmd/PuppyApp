@@ -11,8 +11,8 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.6";
-const APP_BUILD = "26 Aug 2026";
+const APP_VERSION = "1.7";
+const APP_BUILD = "13 Oct 2026";
 
 // ---- poop-bag roll ----
 // State lives in its own doc (meta/bags) so nothing is ever written to the
@@ -1154,7 +1154,10 @@ function TrendsView({ events, now, puppyName }) {
 // day's block, which is midnight — the day's chronological end.
 function DaySummary({ items, sleepMs, isToday, customTypes }) {
   const count = (t) => items.filter((e) => e.type === t).length;
-  const walkMin = items.filter((e) => e.type === "walk").reduce((s, e) => s + (e.durationMin || 0), 0);
+  const dayWalks = items.filter((e) => e.type === "walk");
+  const walkMin = dayWalks.reduce((s, e) => s + (Number(e.durationMin) || 0), 0);
+  const walkDistM = dayWalks.reduce((s, e) => s + (Number(e.distanceM) || 0), 0);
+  const walkTxt = [dayWalks.length, walkMin ? fmtDur(walkMin * 60000) : null, walkDistM ? fmtDist(walkDistM) : null].filter((x) => x !== null).join(" · ");
   const cave = items.filter((e) => e.indoor && e.place === "cave").length;
   const house = items.filter((e) => e.indoor).length - cave;
   const onceCount = items.filter((e) => e.type === "once").length;
@@ -1162,7 +1165,7 @@ function DaySummary({ items, sleepMs, isToday, customTypes }) {
   const chips = [
     { glyph: "💧", txt: count("pee"), always: true },
     { glyph: "💩", txt: count("poop"), always: true },
-    { glyph: "🐾", txt: count("walk") + (walkMin ? " · " + walkMin + "m" : ""), always: true },
+    { glyph: "🐾", txt: walkTxt, always: true },
     { glyph: "🦴", txt: count("training") },
     ...customTypes.map((c) => ({ glyph: c.glyph, txt: count(c.id) })),
     { glyph: "⭐", txt: onceCount },
