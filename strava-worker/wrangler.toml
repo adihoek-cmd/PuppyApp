@@ -1,0 +1,10 @@
+name = "puppy-strava"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+STRAVA_CLIENT_ID = "PASTE_CLIENT_ID_HERE"
+
+[[kv_namespaces]]
+binding = "STRAVA"
+id = "PASTE_KV_ID_HERE"
