@@ -11,8 +11,8 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.7";
-const APP_BUILD = "13 Oct 2026";
+const APP_VERSION = "1.8";
+const APP_BUILD = "12 Nov 2026";
 
 // ---- poop-bag roll ----
 // State lives in its own doc (meta/bags) so nothing is ever written to the
@@ -316,12 +316,15 @@ function Tracker({ family, onLeave }) {
   const [showBags, setShowBags] = useState(false);
   const [bagAlertHidden, setBagAlertHidden] = useState(false);
   const bagNotified = useRef(null);
+  const [eventsLoaded, setEventsLoaded] = useState(false);
+  const linkActionDone = useRef(false);
 
   const famRef = db.collection("families").doc(family);
 
   useEffect(() => {
     const unsubEv = famRef.collection("events").orderBy("ts", "desc").onSnapshot((snap) => {
       setEvents(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setEventsLoaded(true);
     });
     const unsubCfg = famRef.collection("meta").doc("config").onSnapshot((d) => {
       const data = d.exists ? d.data() : {};
@@ -355,6 +358,23 @@ function Tracker({ family, onLeave }) {
     famRef.collection("events").add(data);
     endSleepIfActive(data.ts);
   };
+  // ---- link actions: ?action=start-walk does exactly what tapping Walk does ----
+  // Waits for the first events snapshot so an ongoing sleep gets closed as usual,
+  // then strips the parameter so a reload or back-navigation can't log it twice.
+  useEffect(() => {
+    if (!eventsLoaded || linkActionDone.current) return;
+    linkActionDone.current = true;
+    let action = null;
+    try { action = new URLSearchParams(window.location.search).get("action"); } catch (err) { return; }
+    if (!action) return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("action");
+      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch (err) { /* old browser — param stays, still runs once per page load */ }
+    if (action === "start-walk") addEvent("walk");
+  }, [eventsLoaded]);
+
   const saveEvent = ({ id, type, ts, end, durationMin, distanceM, place }) => {
     if (type === "sleep") {
       if (id) {
