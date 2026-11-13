@@ -22,6 +22,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.view.View
 import android.view.WindowInsets
+import android.window.OnBackInvokedDispatcher
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -101,6 +102,11 @@ class MainActivity : Activity() {
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
 
+        // Android 13+: the system back gesture / button comes here (enableOnBackInvokedCallback in the manifest).
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { handleBack() }
+        }
+
         if (savedInstanceState != null) web.restoreState(savedInstanceState)
         else web.loadUrl(urlFor(intent))
     }
@@ -119,13 +125,16 @@ class MainActivity : Activity() {
     }
 
     /** Back closes whatever is open in Puppy Log (sheet, Settings, other tab) before leaving the app. */
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
+    private fun handleBack() {
         web.evaluateJavascript("(window.__puppyBack && window.__puppyBack()) ? '1' : '0'") { r ->
             if (r?.contains("1") == true) return@evaluateJavascript
             if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
         }
     }
+
+    // Android 12 and older.
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() = handleBack()
 
     private fun offlinePage() = """
         <html><body style="font-family:sans-serif;background:#FFF7ED;color:#44403C;text-align:center;padding:40px">
@@ -198,6 +207,9 @@ class MainActivity : Activity() {
     /** Methods the page can call as window.PuppyNative.xxx(). They arrive off the main thread. */
     inner class Bridge {
         @JavascriptInterface fun isApp(): Boolean = true
+
+        @JavascriptInterface fun appVersion(): String =
+            runCatching { packageManager.getPackageInfo(packageName, 0).versionName ?: "" }.getOrDefault("")
 
         @JavascriptInterface fun startWalk(eventId: String, family: String, by: String, ts: String) {
             main.post { this@MainActivity.startWalk(eventId, family, by, ts.toLongOrNull() ?: System.currentTimeMillis()) }

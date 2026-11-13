@@ -1500,7 +1500,7 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
 
       <button onClick={onLeave} className="w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">Switch family / sign out of this log</button>
 
-      <div className="mt-4 text-center text-[11px] font-medium text-stone-400">🐾 Puppy Log <b className="text-stone-500">v{APP_VERSION}</b> · {APP_BUILD}</div>
+      <div className="mt-4 text-center text-[11px] font-medium text-stone-400">🐾 Puppy Log <b className="text-stone-500">v{APP_VERSION}</b> · {APP_BUILD}{NATIVE && NATIVE.appVersion ? <span> · Android app <b className="text-stone-500">{NATIVE.appVersion()}</b></span> : null}</div>
     </Sheet>
   );
 }
