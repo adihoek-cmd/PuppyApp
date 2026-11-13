@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.2";
+const APP_VERSION = "2.3";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -292,7 +292,7 @@ function loadLeaflet() {
   return leafletPromise;
 }
 // heat = many faint red lines that build up where you walk most; otherwise one green route.
-function RouteMap({ lines, height, interactive, heat }) {
+function RouteMap({ lines, height, interactive, heat, flush }) {
   const box = useRef(null), map = useRef(null), layer = useRef(null);
   const [ready, setReady] = useState(false); // true once this component's own map exists
   const [failed, setFailed] = useState(false);
@@ -328,7 +328,7 @@ function RouteMap({ lines, height, interactive, heat }) {
     setTimeout(() => m.invalidateSize(), 60);
   }, [ready, lines, heat]);
   return (
-    <div className="relative isolate w-full overflow-hidden rounded-2xl bg-stone-100" style={{ height }}>
+    <div className={"relative isolate w-full overflow-hidden bg-stone-100" + (flush ? "" : " rounded-2xl")} style={{ height }}>
       <div ref={box} className="absolute inset-0" />
       {failed ? <div className="absolute inset-0 flex items-center justify-center text-xs text-stone-400">Map couldn't load — check the connection</div> : null}
     </div>
@@ -1371,7 +1371,7 @@ function DaySummary({ items, sleepMs, isToday, customTypes }) {
 function Sheet({ title, onClose, children }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={onClose}>
-      <div className="w-full max-w-md rounded-t-3xl bg-white p-5 shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
+      <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-bold text-stone-800">{title}</h3>
           <button onClick={onClose} className="rounded-full px-2 py-1 text-stone-400 active:bg-stone-100" aria-label="Close">✕</button>
@@ -1456,12 +1456,6 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
 
       {type === "walk" && (
         <>
-          {route && route.length > 1 ? (
-            <div className="mb-4">
-              <RouteMap lines={routeLines} height={170} interactive={false} />
-              <p className="mt-1 text-[11px] text-stone-400">🟢 start · 🔴 end</p>
-            </div>
-          ) : null}
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Walk length</label>
           <div className="mb-2 flex flex-wrap gap-1.5">
             {[5, 10, 15, 20, 30, 45, 60].map((m) => (
@@ -1478,6 +1472,14 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
             ))}
           </div>
           <input type="number" inputMode="numeric" value={dist} onChange={(e) => setDist(e.target.value)} placeholder="metres (optional)" className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
+
+          {/* The walk's route (GPS walks from the Android app): full sheet width, ~¼ of the screen high. */}
+          {route && route.length > 1 ? (
+            <div className="-mx-5 mb-3">
+              <RouteMap lines={routeLines} height="25vh" interactive={false} flush />
+              <p className="mt-1 px-5 text-[11px] text-stone-400">🟢 start · 🔴 end</p>
+            </div>
+          ) : null}
         </>
       )}
 
