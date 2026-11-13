@@ -11,8 +11,11 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.8";
-const APP_BUILD = "12 Nov 2026";
+const APP_VERSION = "1.9";
+const APP_BUILD = "13 Nov 2026";
+// Opt-in per device: tapping Walk also opens the Puppy Log Walk app to record the GPS route.
+const GPS_KEY = "puppy-gps-recorder";
+const RECORDER_PACKAGE = "com.adihoek.puppylog.walk";
 
 // ---- poop-bag roll ----
 // State lives in its own doc (meta/bags) so nothing is ever written to the
@@ -355,8 +358,22 @@ function Tracker({ family, onLeave }) {
   // ---- writes ----
   const addEvent = (type) => {
     const data = { type, ts: Date.now(), by: who || "Someone" };
-    famRef.collection("events").add(data);
+    const ref = famRef.collection("events").doc();
+    ref.set(data);
     endSleepIfActive(data.ts);
+    if (type === "walk" && gpsOn) openRecorder(ref.id, data);
+  };
+
+  // ---- GPS route recording (Puppy Log Walk Android app), opt-in per device ----
+  const [gpsOn, setGpsOn] = useState(() => { try { return localStorage.getItem(GPS_KEY) === "1"; } catch (err) { return false; } });
+  const toggleGps = () => {
+    const v = !gpsOn; setGpsOn(v);
+    try { localStorage.setItem(GPS_KEY, v ? "1" : "0"); } catch (err) { /* private mode */ }
+  };
+  const openRecorder = (eventId, data) => {
+    const q = "event=" + encodeURIComponent(eventId) + "&family=" + encodeURIComponent(family) +
+      "&by=" + encodeURIComponent(data.by) + "&ts=" + data.ts;
+    window.location.href = "intent://start?" + q + "#Intent;scheme=puppylogwalk;package=" + RECORDER_PACKAGE + ";end";
   };
   // ---- link actions: ?action=start-walk does exactly what tapping Walk does ----
   // Waits for the first events snapshot so an ongoing sleep gets closed as usual,
@@ -821,7 +838,7 @@ function Tracker({ family, onLeave }) {
       )}
       {showSettings && (
         <SettingsSheet family={family} customTypes={customTypes} onRemoveCustom={removeCustomType} onExport={exportData} onLeave={onLeave}
-          bagSize={bagSize} onSetBagSize={setRollSize} onClose={() => setShowSettings(false)} />
+          bagSize={bagSize} onSetBagSize={setRollSize} gpsOn={gpsOn} onToggleGps={toggleGps} onClose={() => setShowSettings(false)} />
       )}
     </div>
   );
@@ -1412,7 +1429,7 @@ function BagsSheet({ left, used, size, started, startedTs, onStart, onAdjust, on
   );
 }
 
-function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, onClose }) {
+function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, gpsOn, onToggleGps, onClose }) {
   const [copied, setCopied] = useState(false);
   const copy = () => { navigator.clipboard && navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   return (
@@ -1455,6 +1472,17 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
           ))}
         </div>
         <p className="mt-1.5 text-xs text-stone-400">Applies to the current roll too, so you can fix it if you picked the wrong size.</p>
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Walk route (this phone)</div>
+        <button onClick={onToggleGps}
+          className={"w-full rounded-xl border py-3 text-sm font-bold " + (gpsOn
+            ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+            : "border-stone-200 bg-white text-stone-500 active:bg-stone-50")}>
+          {gpsOn ? "🛰️ Recording walks with GPS: on" : "🛰️ Record walks with GPS: off"}
+        </button>
+        <p className="mt-1.5 text-xs text-stone-400">Needs the Puppy Log Walk app on this Android phone. Tapping Walk opens it to record the route, then it saves the time and distance here and can upload to Strava.</p>
       </div>
 
       <button onClick={onExport} className="mb-2 w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">⬇️ Export data (JSON backup)</button>

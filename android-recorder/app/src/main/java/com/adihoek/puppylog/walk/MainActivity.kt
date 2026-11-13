@@ -1,0 +1,276 @@
+package com.adihoek.puppylog.walk
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import java.util.concurrent.Executors
+
+/**
+ * Opened two ways:
+ *  - from the Puppy Log PWA's Walk button:  puppylogwalk://start?event=ID&family=CODE&by=NAME&ts=MS
+ *    → starts recording that walk and gets out of the way;
+ *  - from the launcher → status, start/stop, family code, Strava connection.
+ */
+class MainActivity : Activity() {
+
+    private lateinit var prefs: Prefs
+    private val main = Handler(Looper.getMainLooper())
+    private val io = Executors.newSingleThreadExecutor()
+    private var pendingLink: Uri? = null
+    private var pendingStartHere = false
+
+    private lateinit var status: TextView
+    private lateinit var startBtn: Button
+    private lateinit var stopBtn: Button
+    private lateinit var extendBtn: Button
+    private lateinit var familyIn: EditText
+    private lateinit var whoIn: EditText
+    private lateinit var stravaStatus: TextView
+    private lateinit var connectBtn: Button
+    private lateinit var autoUpload: CheckBox
+    private lateinit var retryBtn: Button
+
+    private val refresher = object : Runnable {
+        override fun run() { render(); main.postDelayed(this, 5000) }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        prefs = Prefs(this)
+        buildUi()
+        handle(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handle(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        main.post(refresher)
+        collectStravaPairing()
+        if (prefs.conn.isNotEmpty() && PendingUploads(this).count() > 0) retryUploads(quiet = true)
+    }
+
+    override fun onPause() {
+        main.removeCallbacks(refresher)
+        super.onPause()
+    }
+
+    // ---------------------------------------------------------------- deep link
+
+    private fun handle(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "puppylogwalk") return
+        if (!hasPermissions()) { pendingLink = uri; askPermissions(); return }
+        startFromLink(uri)
+    }
+
+    private fun startFromLink(uri: Uri) {
+        val ev = uri.getQueryParameter("event").orEmpty()
+        val fam = uri.getQueryParameter("family").orEmpty()
+        val by = uri.getQueryParameter("by").orEmpty()
+        val ts = uri.getQueryParameter("ts")?.toLongOrNull() ?: System.currentTimeMillis()
+        if (ev.isEmpty() || fam.isEmpty()) { toast("This link is missing the walk details."); return }
+        prefs.family = fam
+        if (by.isNotBlank()) prefs.who = by
+        WalkService.start(this, ev, fam, ts)
+        toast("🐾 Recording the walk")
+        // Hand the screen back to Puppy Log.
+        moveTaskToBack(true)
+    }
+
+    // ---------------------------------------------------------------- permissions
+
+    private fun hasPermissions(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun askPermissions() {
+        val list = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 33) list += Manifest.permission.POST_NOTIFICATIONS
+        requestPermissions(list.toTypedArray(), 7)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (!hasPermissions()) { toast("Location permission is needed to record the route."); return }
+        pendingLink?.let { pendingLink = null; startFromLink(it) }
+        if (pendingStartHere) { pendingStartHere = false; startHere() }
+    }
+
+    // ---------------------------------------------------------------- actions
+
+    /** Start a walk from this app: logs it in Puppy Log, then records it. */
+    private fun startHere() {
+        saveFields()
+        if (prefs.family.isEmpty()) { toast("Enter your family code first."); return }
+        if (!hasPermissions()) { pendingStartHere = true; askPermissions(); return }
+        startBtn.isEnabled = false
+        val fam = prefs.family; val who = prefs.who; val ts = System.currentTimeMillis()
+        io.execute {
+            val r = runCatching { Firestore(this).createWalk(fam, who, ts) }
+            main.post {
+                startBtn.isEnabled = true
+                r.onSuccess { id -> WalkService.start(this, id, fam, ts); toast("🐾 Walk started"); render() }
+                r.onFailure { toast(it.message ?: "Couldn't start the walk") }
+            }
+        }
+    }
+
+    private fun connectStrava() {
+        if (prefs.conn.isNotEmpty()) {
+            val conn = prefs.conn
+            prefs.conn = ""; prefs.athlete = ""
+            io.execute { runCatching { Strava.disconnect(conn) } }
+            render(); return
+        }
+        val pair = Strava.newPairId()
+        prefs.pendingPair = pair
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Strava.connectUrl(pair))))
+    }
+
+    /** After the Strava approval page, pick up the connection from the Worker. */
+    private fun collectStravaPairing() {
+        val pair = prefs.pendingPair
+        if (pair.isEmpty()) return
+        io.execute {
+            var got: Pair<String, String>? = null
+            for (i in 0 until 6) {
+                got = runCatching { Strava.pollPair(pair) }.getOrNull()
+                if (got != null) break
+                Thread.sleep(2000)
+            }
+            val result = got
+            main.post {
+                if (result != null) {
+                    prefs.conn = result.first; prefs.athlete = result.second; prefs.pendingPair = ""
+                    toast("Strava connected")
+                }
+                render()
+            }
+        }
+    }
+
+    private fun retryUploads(quiet: Boolean) {
+        val conn = prefs.conn
+        if (conn.isEmpty()) return
+        io.execute {
+            val n = runCatching { PendingUploads(this).retryAll(conn) }.getOrDefault(0)
+            main.post { if (!quiet || n > 0) toast("Uploaded $n walk(s) to Strava"); render() }
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun askBatteryExemption() {
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) { toast("Already unrestricted 👍"); return }
+        startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+    }
+
+    private fun saveFields() {
+        prefs.family = familyIn.text.toString().trim().lowercase().replace(Regex("\\s+"), "-")
+        prefs.who = whoIn.text.toString().trim()
+    }
+
+    // ---------------------------------------------------------------- UI
+
+    private fun render() {
+        if (prefs.recording) {
+            val min = (System.currentTimeMillis() - prefs.activeStart) / 60000
+            val m = Track.distanceM(PointFile(this).read())
+            val km = if (m >= 1000) "%.2f km".format(m / 1000.0) else "$m m"
+            val limit = if (prefs.extended) "no time limit" else "auto-stop at ${Config.AUTO_STOP_MIN} min"
+            status.text = "🐾 Walking · $min min · $km\n$limit"
+            startBtn.visibility = View.GONE
+            stopBtn.visibility = View.VISIBLE
+            extendBtn.visibility = if (prefs.extended) View.GONE else View.VISIBLE
+        } else {
+            status.text = "No walk running"
+            startBtn.visibility = View.VISIBLE
+            stopBtn.visibility = View.GONE
+            extendBtn.visibility = View.GONE
+        }
+        val connected = prefs.conn.isNotEmpty()
+        stravaStatus.text = if (connected) "Connected" + (if (prefs.athlete.isNotEmpty()) " as ${prefs.athlete}" else "") else "Not connected"
+        connectBtn.text = if (connected) "Disconnect Strava" else "Connect Strava"
+        autoUpload.isEnabled = connected
+        autoUpload.isChecked = prefs.autoUpload
+        val pending = PendingUploads(this).count()
+        retryBtn.visibility = if (connected && pending > 0) View.VISIBLE else View.GONE
+        retryBtn.text = "Upload $pending waiting walk(s)"
+    }
+
+    private fun buildUi() {
+        val dp = resources.displayMetrics.density
+        fun px(v: Int) = (v * dp).toInt()
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(px(20), px(28), px(20), px(28))
+            setBackgroundColor(Color.parseColor("#FFF7ED"))
+        }
+        fun label(t: String, size: Float = 14f, bold: Boolean = false) = TextView(this).apply {
+            text = t; textSize = size; setTextColor(Color.parseColor("#44403C"))
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, px(14), 0, px(4))
+        }
+        fun button(t: String, onClick: () -> Unit) = Button(this).apply { text = t; isAllCaps = false; setOnClickListener { onClick() } }
+
+        col.addView(label("🐾 Puppy Log Walk", 24f, true))
+        status = label("", 18f).also { col.addView(it) }
+        startBtn = button("Start walk") { startHere() }.also { col.addView(it) }
+        stopBtn = button("End walk") { WalkService.send(this, WalkService.ACTION_STOP); main.postDelayed({ render() }, 800) }.also { col.addView(it) }
+        extendBtn = button("Extend (no time limit)") { WalkService.send(this, WalkService.ACTION_EXTEND); main.postDelayed({ render() }, 500) }.also { col.addView(it) }
+
+        col.addView(label("Family code (same as in Puppy Log)", 14f, true))
+        familyIn = EditText(this).apply { setText(prefs.family); inputType = InputType.TYPE_CLASS_TEXT; setSingleLine() }.also { col.addView(it) }
+        col.addView(label("Your name", 14f, true))
+        whoIn = EditText(this).apply { setText(prefs.who); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS; setSingleLine() }.also { col.addView(it) }
+        col.addView(button("Save") { saveFields(); toast("Saved") })
+
+        col.addView(label("Strava", 18f, true))
+        stravaStatus = label("").also { col.addView(it) }
+        connectBtn = button("Connect Strava") { connectStrava() }.also { col.addView(it) }
+        autoUpload = CheckBox(this).apply {
+            text = "Upload my walks to Strava automatically"
+            setOnCheckedChangeListener { _, c -> prefs.autoUpload = c }
+        }.also { col.addView(it) }
+        retryBtn = button("Upload waiting walks") { retryUploads(quiet = false) }.also { col.addView(it) }
+        col.addView(label("Strava can't make uploads private through its API. Walks are hidden from followers' feeds; to make them fully private set your default activity visibility to \"Only You\" in Strava's Privacy Controls.", 12f))
+
+        col.addView(label("Reliability", 18f, true))
+        col.addView(button("Let it run in the background (battery)") { askBatteryExemption() })
+        col.addView(label("Recommended on Samsung phones, otherwise the phone may stop the recording when the screen is off.", 12f))
+
+        setContentView(ScrollView(this).apply { addView(col); isFillViewport = true })
+        col.gravity = Gravity.TOP
+    }
+
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    override fun onDestroy() {
+        io.shutdown()
+        super.onDestroy()
+    }
+}
