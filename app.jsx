@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.4";
+const APP_VERSION = "2.5";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -807,36 +807,20 @@ function Tracker({ family, onLeave }) {
 
         {tab === "log" ? (
           <>
-            {/* Sleep control */}
-            {ongoingSleep ? (
-              <div className={"mb-4 flex items-center gap-3 rounded-2xl p-3.5 text-white shadow-md " + (sleepStuck ? "bg-amber-600" : "bg-indigo-600")}>
-                <span className="text-2xl animate-pulse">{sleepStuck ? "⚠️" : "😴"}</span>
+            {/* Forgotten sleep timer — needs a fix, so it stays prominent */}
+            {ongoingSleep && sleepStuck ? (
+              <div className="mb-4 flex items-center gap-3 rounded-2xl bg-amber-600 p-3.5 text-white shadow-md">
+                <span className="text-2xl animate-pulse">⚠️</span>
                 <div className="min-w-0 flex-1">
-                  {sleepStuck ? (
-                    <>
-                      <div className="text-sm font-bold">Still asleep after {fmtDur(ongoingMs)}?</div>
-                      <div className="truncate text-xs text-amber-100">Looks like a forgotten timer — fix the end time, or stop.</div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="text-sm font-bold">Asleep · {fmtDur(ongoingMs)}</div>
-                      <div className="truncate text-xs text-indigo-200">since {clockTime(ongoingSleep.ts)} · started by {ongoingSleep.by}</div>
-                    </>
-                  )}
+                  <div className="text-sm font-bold">Still asleep after {fmtDur(ongoingMs)}?</div>
+                  <div className="truncate text-xs text-amber-100">Looks like a forgotten timer — fix the end time, or stop.</div>
                 </div>
                 <div className="flex shrink-0 gap-2">
                   <button onClick={() => setEditTarget(ongoingSleep)} className="rounded-xl bg-white/20 px-3 py-2 text-sm font-bold active:bg-white/30">Fix</button>
                   <button onClick={stopSleep} className="rounded-xl bg-white/20 px-3 py-2 text-sm font-bold active:bg-white/30">Stop</button>
                 </div>
               </div>
-            ) : (
-              <div className="mb-4">
-                <button onClick={startSleep} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-indigo-500 py-3.5 text-white shadow-md transition-transform active:scale-95 active:bg-indigo-600">
-                  <span className="text-xl">😴</span><span className="font-bold">Start sleep</span>
-                </button>
-                {todaySleepMs > 0 ? <div className="mt-1 text-center text-xs text-stone-400">Slept {fmtDur(todaySleepMs)} today</div> : null}
-              </div>
-            )}
+            ) : null}
 
             {/* Status strip */}
             <div className="grid grid-cols-3 gap-2 mb-5">
@@ -875,17 +859,29 @@ function Tracker({ family, onLeave }) {
               </button>
             ) : null}
 
-            {/* Secondary + custom pads */}
-            <div className="mb-5 flex flex-wrap gap-2">
+            {/* Secondary pads: sleep, training, custom types, one-off — up to 4 per row */}
+            <div className="mb-5 grid grid-cols-4 gap-2">
+              {ongoingSleep && !sleepStuck ? (
+                <button onClick={stopSleep} className="flex flex-col items-center justify-center gap-0.5 rounded-2xl bg-indigo-600 px-1 py-2.5 text-white shadow-sm transition-transform active:scale-95 active:bg-indigo-700">
+                  <span className="text-lg">☀️</span><span className="text-xs font-bold leading-tight">Wake</span>
+                  <span className="text-[10px] font-semibold leading-tight text-indigo-200 tabular-nums">{fmtDur(ongoingMs)}</span>
+                </button>
+              ) : (
+                <button onClick={startSleep} disabled={!!ongoingSleep} className="flex flex-col items-center justify-center gap-0.5 rounded-2xl bg-indigo-500 px-1 py-2.5 text-white shadow-sm transition-transform active:scale-95 active:bg-indigo-600 disabled:opacity-50">
+                  <span className="text-lg">😴</span><span className="text-xs font-bold leading-tight">Sleep</span>
+                </button>
+              )}
               {secondary.map((t) => {
                 const T = rt(t);
                 return (
-                  <button key={t} onClick={() => addEvent(t)} className={"flex flex-1 min-w-[30%] items-center justify-center gap-2 rounded-2xl py-3 shadow-sm transition-transform active:scale-95 " + T.btn}>
-                    <span className="text-lg">{T.glyph}</span><span className="text-sm font-bold">{T.full}</span>
+                  <button key={t} onClick={() => addEvent(t)} className={"flex flex-col items-center justify-center gap-0.5 rounded-2xl px-1 py-2.5 shadow-sm transition-transform active:scale-95 " + T.btn}>
+                    <span className="text-lg">{T.glyph}</span><span className="w-full truncate text-center text-xs font-bold leading-tight">{T.full}</span>
                   </button>
                 );
               })}
-              <button onClick={() => setOneOff({ isNew: true, ts: Date.now() })} className="flex flex-1 min-w-[30%] items-center justify-center gap-1 rounded-2xl border-2 border-dashed border-stone-300 py-3 text-sm font-semibold text-stone-400 active:bg-white/60">＋ One-off</button>
+              <button onClick={() => setOneOff({ isNew: true, ts: Date.now() })} className="flex flex-col items-center justify-center gap-0.5 rounded-2xl border-2 border-dashed border-stone-300 px-1 py-2.5 text-stone-400 active:bg-white/60">
+                <span className="text-lg">＋</span><span className="text-xs font-semibold leading-tight">One-off</span>
+              </button>
             </div>
 
             {/* History */}
@@ -1170,7 +1166,7 @@ function SleepView({ events, now }) {
       <div className="space-y-4">
         {notice}
         <div className="rounded-2xl border border-dashed border-stone-300 bg-white/50 px-4 py-10 text-center text-sm text-stone-500">
-          No sleep logged yet. Tap <b className="text-indigo-600">😴 Start sleep</b> on the Log tab when he dozes off, and again when he wakes.
+          No sleep logged yet. Tap <b className="text-indigo-600">😴 Sleep</b> on the Log tab when he dozes off, and again when he wakes.
         </div>
       </div>
     );
