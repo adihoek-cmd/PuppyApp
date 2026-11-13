@@ -168,7 +168,9 @@ async function settleUpload(token, uploadId, tries) {
       await fetch(API + "/activities/" + st.activity_id, {
         method: "PUT",
         headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-        body: JSON.stringify({ sport_type: "Walk" }),
+        // The API can't set "Only You" visibility (Strava removed it); hide_from_home is the
+        // closest it allows: the walk stays off followers' home feeds.
+        body: JSON.stringify({ sport_type: "Walk", hide_from_home: true }),
       });
       return { uploadId, state: "done", activityId: st.activity_id, url: STRAVA + "/activities/" + st.activity_id };
     }
