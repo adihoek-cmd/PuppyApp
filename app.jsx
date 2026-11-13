@@ -11,11 +11,11 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "1.9";
+const APP_VERSION = "2.0";
 const APP_BUILD = "13 Nov 2026";
-// Opt-in per device: tapping Walk also opens the Puppy Log Walk app to record the GPS route.
-const GPS_KEY = "puppy-gps-recorder";
-const RECORDER_PACKAGE = "com.adihoek.puppylog.walk";
+// Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
+// files). In a normal browser it's undefined and everything works as a plain web app.
+const NATIVE = (typeof window !== "undefined" && window.PuppyNative) ? window.PuppyNative : null;
 
 // ---- poop-bag roll ----
 // State lives in its own doc (meta/bags) so nothing is ever written to the
@@ -223,6 +223,7 @@ function makeReminderICS({ title, note, hour, minute }) {
   return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PuppyLog//EN", "CALSCALE:GREGORIAN", "BEGIN:VEVENT", "UID:" + id, "DTSTAMP:" + icsStampUTC(new Date()), "DTSTART:" + dt, "DURATION:PT10M", "RRULE:FREQ=DAILY", "SUMMARY:" + escapeICS(title), "DESCRIPTION:" + escapeICS(note || "From Puppy Log"), "BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:" + escapeICS(title), "TRIGGER:PT0M", "END:VALARM", "END:VEVENT", "END:VCALENDAR"].join("\r\n");
 }
 function downloadICS(filename, text) {
+  if (NATIVE) { NATIVE.saveFile(filename, "text/calendar", text, true); return; }
   try {
     const blob = new Blob([text], { type: "text/calendar;charset=utf-8" });
     const url = URL.createObjectURL(blob), a = document.createElement("a");
@@ -232,6 +233,7 @@ function downloadICS(filename, text) {
 }
 // download an object as a pretty-printed JSON file (used for data backup)
 function downloadJSON(filename, obj) {
+  if (NATIVE) { NATIVE.saveFile(filename, "application/json", JSON.stringify(obj, null, 2), false); return; }
   try {
     const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob), a = document.createElement("a");
@@ -361,20 +363,9 @@ function Tracker({ family, onLeave }) {
     const ref = famRef.collection("events").doc();
     ref.set(data);
     endSleepIfActive(data.ts);
-    if (type === "walk" && gpsOn) openRecorder(ref.id, data);
+    if (type === "walk" && NATIVE) NATIVE.startWalk(ref.id, family, data.by, String(data.ts));
   };
 
-  // ---- GPS route recording (Puppy Log Walk Android app), opt-in per device ----
-  const [gpsOn, setGpsOn] = useState(() => { try { return localStorage.getItem(GPS_KEY) === "1"; } catch (err) { return false; } });
-  const toggleGps = () => {
-    const v = !gpsOn; setGpsOn(v);
-    try { localStorage.setItem(GPS_KEY, v ? "1" : "0"); } catch (err) { /* private mode */ }
-  };
-  const openRecorder = (eventId, data) => {
-    const q = "event=" + encodeURIComponent(eventId) + "&family=" + encodeURIComponent(family) +
-      "&by=" + encodeURIComponent(data.by) + "&ts=" + data.ts;
-    window.location.href = "intent://start?" + q + "#Intent;scheme=puppylogwalk;package=" + RECORDER_PACKAGE + ";end";
-  };
   // ---- link actions: ?action=start-walk does exactly what tapping Walk does ----
   // Waits for the first events snapshot so an ongoing sleep gets closed as usual,
   // then strips the parameter so a reload or back-navigation can't log it twice.
@@ -442,6 +433,8 @@ function Tracker({ family, onLeave }) {
   const openWalk = events.find((e) => e.type === "walk" && !e.durationMin && e.ts <= now && now - e.ts < WALK_OPEN_MAX_MS);
   const endWalk = () => {
     if (!openWalk) return;
+    // Being GPS-recorded on this phone: let the app end it (exact time + route distance).
+    if (NATIVE && NATIVE.recordingEvent() === openWalk.id) { NATIVE.stopWalk(); return; }
     const mins = Math.max(1, Math.round((Date.now() - openWalk.ts) / 60000));
     famRef.collection("events").doc(openWalk.id).update({ durationMin: mins });
   };
@@ -461,6 +454,7 @@ function Tracker({ family, onLeave }) {
 
   const askNotifyPermission = () => {
     try {
+      if (NATIVE) { NATIVE.askNotifications(); return; }
       if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission();
     } catch (err) { /* unsupported browser — banner still works */ }
   };
@@ -483,6 +477,7 @@ function Tracker({ family, onLeave }) {
     const title = bagLeft === 0 ? "🛍️ Poop bags: none left" : "🛍️ Poop bags: last one";
     const body = bagLeft === 0 ? "The roll is empty — grab a new one." : "One bag left on the roll.";
     const opts = { body, tag: "puppy-bags", renotify: true };
+    if (NATIVE) { try { NATIVE.notify(title, body); } catch (err) { /* banner is the fallback */ } return; }
     try {
       if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
       // Android Chrome forbids `new Notification()`; use the service worker when there is one.
@@ -838,7 +833,7 @@ function Tracker({ family, onLeave }) {
       )}
       {showSettings && (
         <SettingsSheet family={family} customTypes={customTypes} onRemoveCustom={removeCustomType} onExport={exportData} onLeave={onLeave}
-          bagSize={bagSize} onSetBagSize={setRollSize} gpsOn={gpsOn} onToggleGps={toggleGps} onClose={() => setShowSettings(false)} />
+          bagSize={bagSize} onSetBagSize={setRollSize} onClose={() => setShowSettings(false)} />
       )}
     </div>
   );
@@ -1429,9 +1424,9 @@ function BagsSheet({ left, used, size, started, startedTs, onStart, onAdjust, on
   );
 }
 
-function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, gpsOn, onToggleGps, onClose }) {
+function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, onClose }) {
   const [copied, setCopied] = useState(false);
-  const copy = () => { navigator.clipboard && navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+  const copy = () => { if (NATIVE) NATIVE.copy(family); else if (navigator.clipboard) navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   return (
     <Sheet title="Settings" onClose={onClose}>
       <div className="mb-4">
@@ -1474,16 +1469,16 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
         <p className="mt-1.5 text-xs text-stone-400">Applies to the current roll too, so you can fix it if you picked the wrong size.</p>
       </div>
 
-      <div className="mb-4">
-        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Walk route (this phone)</div>
-        <button onClick={onToggleGps}
-          className={"w-full rounded-xl border py-3 text-sm font-bold " + (gpsOn
-            ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-            : "border-stone-200 bg-white text-stone-500 active:bg-stone-50")}>
-          {gpsOn ? "🛰️ Recording walks with GPS: on" : "🛰️ Record walks with GPS: off"}
-        </button>
-        <p className="mt-1.5 text-xs text-stone-400">Needs the Puppy Log Walk app on this Android phone. Tapping Walk opens it to record the route, then it saves the time and distance here and can upload to Strava.</p>
-      </div>
+      {NATIVE && (
+        <div className="mb-4">
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Walk route & Strava</div>
+          <button onClick={() => NATIVE.openSettings()}
+            className="w-full rounded-xl border border-emerald-300 bg-emerald-50 py-3 text-sm font-bold text-emerald-700 active:bg-emerald-100">
+            🛰️ Walk recording & Strava
+          </button>
+          <p className="mt-1.5 text-xs text-stone-400">Walks you start on this phone record the GPS route. Connect Strava there to upload them.</p>
+        </div>
+      )}
 
       <button onClick={onExport} className="mb-2 w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">⬇️ Export data (JSON backup)</button>
       <p className="mb-4 text-xs text-stone-400">Saves a file with the full log to this device. Do it now and then whenever you want a snapshot.</p>

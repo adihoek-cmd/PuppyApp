@@ -3,274 +3,236 @@ package com.adihoek.puppylog.walk
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
-import android.text.InputType
-import android.view.Gravity
+import android.provider.MediaStore
 import android.view.View
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import android.view.WindowInsets
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
-import java.util.concurrent.Executors
+import java.io.File
 
 /**
- * Opened two ways:
- *  - from the Puppy Log PWA's Walk button:  puppylogwalk://start?event=ID&family=CODE&by=NAME&ts=MS
- *    → starts recording that walk and gets out of the way;
- *  - from the launcher → status, start/stop, family code, Strava connection.
+ * Puppy Log as one Android app: the live Puppy Log web app (same URL as in the browser,
+ * so web updates arrive as before) plus native GPS walk recording.
+ *
+ * The page sees `window.PuppyNative` and uses it for: starting the GPS recording when you
+ * tap Walk, the bag alert notification, saving backup / calendar files, copying the family
+ * code, and opening the native "Walk recording & Strava" screen.
+ *
+ * puppylogwalk://start-walk opens the app and logs + records a walk (same as the web
+ * ?action=start-walk link, which still works in the browser without GPS).
  */
 class MainActivity : Activity() {
 
-    private lateinit var prefs: Prefs
-    private val main = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
-    private var pendingLink: Uri? = null
-    private var pendingStartHere = false
-
-    private lateinit var status: TextView
-    private lateinit var startBtn: Button
-    private lateinit var stopBtn: Button
-    private lateinit var extendBtn: Button
-    private lateinit var familyIn: EditText
-    private lateinit var whoIn: EditText
-    private lateinit var stravaStatus: TextView
-    private lateinit var connectBtn: Button
-    private lateinit var autoUpload: CheckBox
-    private lateinit var retryBtn: Button
-
-    private val refresher = object : Runnable {
-        override fun run() { render(); main.postDelayed(this, 5000) }
+    companion object {
+        const val HOME = "https://adihoek-cmd.github.io/PuppyApp/"
+        private const val HOST = "adihoek-cmd.github.io"
+        private const val CH_BAGS = "bags"
+        private const val REQ_WALK = 11
+        private const val REQ_NOTIFY = 12
     }
 
+    private lateinit var web: WebView
+    private val main = Handler(Looper.getMainLooper())
+    private var pendingWalk: Array<String>? = null
+
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        prefs = Prefs(this)
-        buildUi()
-        handle(intent)
+        getSystemService(NotificationManager::class.java)
+            .createNotificationChannel(NotificationChannel(CH_BAGS, "Poop bag alerts", NotificationManager.IMPORTANCE_DEFAULT))
+
+        web = WebView(this)
+        web.settings.javaScriptEnabled = true
+        web.settings.domStorageEnabled = true
+        web.settings.userAgentString = web.settings.userAgentString + " PuppyLogApp/2"
+        web.addJavascriptInterface(Bridge(), "PuppyNative")
+        web.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, req: WebResourceRequest): Boolean {
+                val u = req.url
+                if (u.host == HOST && (u.scheme == "https" || u.scheme == "http")) return false
+                // Anything else (Strava, mail, other sites) opens outside the app.
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, u)) }
+                return true
+            }
+
+            override fun onReceivedError(view: WebView, req: WebResourceRequest, err: WebResourceError) {
+                if (req.isForMainFrame) view.loadDataWithBaseURL(null, offlinePage(), "text/html", "utf-8", null)
+            }
+        }
+
+        val root = FrameLayout(this)
+        root.setBackgroundColor(Color.parseColor("#FFF7ED"))
+        root.addView(web, FrameLayout.LayoutParams(-1, -1))
+        // Keep the page clear of the status / navigation bars (Android 15 draws edge-to-edge).
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val b = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
+                v.setPadding(b.left, b.top, b.right, b.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+            }
+            insets
+        }
+        setContentView(root)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = Color.parseColor("#FFF7ED")
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+
+        if (savedInstanceState != null) web.restoreState(savedInstanceState)
+        else web.loadUrl(urlFor(intent))
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handle(intent)
+        if (intent.data?.scheme == "puppylogwalk") web.loadUrl(urlFor(intent))
     }
 
-    override fun onResume() {
-        super.onResume()
-        main.post(refresher)
-        collectStravaPairing()
-        if (prefs.conn.isNotEmpty() && PendingUploads(this).count() > 0) retryUploads(quiet = true)
+    private fun urlFor(i: Intent?): String =
+        if (i?.data?.scheme == "puppylogwalk" && i.data?.host == "start-walk") "$HOME?action=start-walk" else HOME
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        web.saveState(outState)
     }
 
-    override fun onPause() {
-        main.removeCallbacks(refresher)
-        super.onPause()
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (web.canGoBack()) web.goBack() else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
-    // ---------------------------------------------------------------- deep link
+    private fun offlinePage() = """
+        <html><body style="font-family:sans-serif;background:#FFF7ED;color:#44403C;text-align:center;padding:40px">
+        <div style="font-size:44px">🐶</div><h3>No connection</h3>
+        <p>Puppy Log needs the internet to load.</p>
+        <p><a href="$HOME" style="color:#B45309;font-weight:bold">Try again</a></p></body></html>
+    """.trimIndent()
 
-    private fun handle(intent: Intent?) {
-        val uri = intent?.data ?: return
-        if (uri.scheme != "puppylogwalk") return
-        if (!hasPermissions()) { pendingLink = uri; askPermissions(); return }
-        startFromLink(uri)
-    }
+    // ---------------------------------------------------------------- walk start
 
-    private fun startFromLink(uri: Uri) {
-        val ev = uri.getQueryParameter("event").orEmpty()
-        val fam = uri.getQueryParameter("family").orEmpty()
-        val by = uri.getQueryParameter("by").orEmpty()
-        val ts = uri.getQueryParameter("ts")?.toLongOrNull() ?: System.currentTimeMillis()
-        if (ev.isEmpty() || fam.isEmpty()) { toast("This link is missing the walk details."); return }
-        prefs.family = fam
-        if (by.isNotBlank()) prefs.who = by
-        WalkService.start(this, ev, fam, ts)
-        toast("🐾 Recording the walk")
-        // Hand the screen back to Puppy Log.
-        moveTaskToBack(true)
-    }
+    private fun hasLocation() = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-    // ---------------------------------------------------------------- permissions
-
-    private fun hasPermissions(): Boolean =
-        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-    private fun askPermissions() {
-        val list = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-        if (Build.VERSION.SDK_INT >= 33) list += Manifest.permission.POST_NOTIFICATIONS
-        requestPermissions(list.toTypedArray(), 7)
+    private fun startWalk(eventId: String, family: String, by: String, ts: Long) {
+        if (eventId.isEmpty() || family.isEmpty()) return
+        val p = Prefs(this)
+        p.family = family
+        if (by.isNotBlank()) p.who = by
+        if (!hasLocation()) {
+            pendingWalk = arrayOf(eventId, family, by, ts.toString())
+            val list = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= 33) list += Manifest.permission.POST_NOTIFICATIONS
+            requestPermissions(list.toTypedArray(), REQ_WALK)
+            return
+        }
+        WalkService.start(this, eventId, family, ts)
+        Toast.makeText(this, "🐾 Recording the route", Toast.LENGTH_SHORT).show()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (!hasPermissions()) { toast("Location permission is needed to record the route."); return }
-        pendingLink?.let { pendingLink = null; startFromLink(it) }
-        if (pendingStartHere) { pendingStartHere = false; startHere() }
+        if (requestCode != REQ_WALK) return
+        val w = pendingWalk ?: return
+        pendingWalk = null
+        if (hasLocation()) startWalk(w[0], w[1], w[2], w[3].toLong())
+        else Toast.makeText(this, "Walk logged without a route (no location permission).", Toast.LENGTH_LONG).show()
     }
 
-    // ---------------------------------------------------------------- actions
+    // ---------------------------------------------------------------- files
 
-    /** Start a walk from this app: logs it in Puppy Log, then records it. */
-    private fun startHere() {
-        saveFields()
-        if (prefs.family.isEmpty()) { toast("Enter your family code first."); return }
-        if (!hasPermissions()) { pendingStartHere = true; askPermissions(); return }
-        startBtn.isEnabled = false
-        val fam = prefs.family; val who = prefs.who; val ts = System.currentTimeMillis()
-        io.execute {
-            val r = runCatching { Firestore(this).createWalk(fam, who, ts) }
-            main.post {
-                startBtn.isEnabled = true
-                r.onSuccess { id -> WalkService.start(this, id, fam, ts); toast("🐾 Walk started"); render() }
-                r.onFailure { toast(it.message ?: "Couldn't start the walk") }
-            }
-        }
-    }
-
-    private fun connectStrava() {
-        if (prefs.conn.isNotEmpty()) {
-            val conn = prefs.conn
-            prefs.conn = ""; prefs.athlete = ""
-            io.execute { runCatching { Strava.disconnect(conn) } }
-            render(); return
-        }
-        val pair = Strava.newPairId()
-        prefs.pendingPair = pair
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Strava.connectUrl(pair))))
-    }
-
-    /** After the Strava approval page, pick up the connection from the Worker. */
-    private fun collectStravaPairing() {
-        val pair = prefs.pendingPair
-        if (pair.isEmpty()) return
-        io.execute {
-            var got: Pair<String, String>? = null
-            for (i in 0 until 6) {
-                got = runCatching { Strava.pollPair(pair) }.getOrNull()
-                if (got != null) break
-                Thread.sleep(2000)
-            }
-            val result = got
-            main.post {
-                if (result != null) {
-                    prefs.conn = result.first; prefs.athlete = result.second; prefs.pendingPair = ""
-                    toast("Strava connected")
+    /** Saves to Downloads; for calendar files also opens them so the calendar app can add the reminder. */
+    private fun saveFile(name: String, mime: String, text: String, open: Boolean) {
+        try {
+            val uri: Uri
+            if (Build.VERSION.SDK_INT >= 29) {
+                val v = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
                 }
-                render()
+                uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
+                    ?: throw IllegalStateException("no Downloads")
+                contentResolver.openOutputStream(uri)!!.use { it.write(text.toByteArray()) }
+            } else {
+                val f = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), name)
+                f.writeText(text)
+                uri = Uri.fromFile(f)
             }
+            if (open && Build.VERSION.SDK_INT >= 29) {
+                val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                runCatching { startActivity(i) }.onFailure { toast("Saved $name to Downloads") }
+            } else toast("Saved $name to Downloads")
+        } catch (e: Exception) {
+            toast("Couldn't save the file: ${e.message}")
         }
-    }
-
-    private fun retryUploads(quiet: Boolean) {
-        val conn = prefs.conn
-        if (conn.isEmpty()) return
-        io.execute {
-            val n = runCatching { PendingUploads(this).retryAll(conn) }.getOrDefault(0)
-            main.post { if (!quiet || n > 0) toast("Uploaded $n walk(s) to Strava"); render() }
-        }
-    }
-
-    @SuppressLint("BatteryLife")
-    private fun askBatteryExemption() {
-        val pm = getSystemService(PowerManager::class.java)
-        if (pm.isIgnoringBatteryOptimizations(packageName)) { toast("Already unrestricted 👍"); return }
-        startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-    }
-
-    private fun saveFields() {
-        prefs.family = familyIn.text.toString().trim().lowercase().replace(Regex("\\s+"), "-")
-        prefs.who = whoIn.text.toString().trim()
-    }
-
-    // ---------------------------------------------------------------- UI
-
-    private fun render() {
-        if (prefs.recording) {
-            val min = (System.currentTimeMillis() - prefs.activeStart) / 60000
-            val m = Track.distanceM(PointFile(this).read())
-            val km = if (m >= 1000) "%.2f km".format(m / 1000.0) else "$m m"
-            val limit = if (prefs.extended) "no time limit" else "auto-stop at ${Config.AUTO_STOP_MIN} min"
-            status.text = "🐾 Walking · $min min · $km\n$limit"
-            startBtn.visibility = View.GONE
-            stopBtn.visibility = View.VISIBLE
-            extendBtn.visibility = if (prefs.extended) View.GONE else View.VISIBLE
-        } else {
-            status.text = "No walk running"
-            startBtn.visibility = View.VISIBLE
-            stopBtn.visibility = View.GONE
-            extendBtn.visibility = View.GONE
-        }
-        val connected = prefs.conn.isNotEmpty()
-        stravaStatus.text = if (connected) "Connected" + (if (prefs.athlete.isNotEmpty()) " as ${prefs.athlete}" else "") else "Not connected"
-        connectBtn.text = if (connected) "Disconnect Strava" else "Connect Strava"
-        autoUpload.isEnabled = connected
-        autoUpload.isChecked = prefs.autoUpload
-        val pending = PendingUploads(this).count()
-        retryBtn.visibility = if (connected && pending > 0) View.VISIBLE else View.GONE
-        retryBtn.text = "Upload $pending waiting walk(s)"
-    }
-
-    private fun buildUi() {
-        val dp = resources.displayMetrics.density
-        fun px(v: Int) = (v * dp).toInt()
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(px(20), px(28), px(20), px(28))
-            setBackgroundColor(Color.parseColor("#FFF7ED"))
-        }
-        fun label(t: String, size: Float = 14f, bold: Boolean = false) = TextView(this).apply {
-            text = t; textSize = size; setTextColor(Color.parseColor("#44403C"))
-            if (bold) typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, px(14), 0, px(4))
-        }
-        fun button(t: String, onClick: () -> Unit) = Button(this).apply { text = t; isAllCaps = false; setOnClickListener { onClick() } }
-
-        col.addView(label("🐾 Puppy Log Walk", 24f, true))
-        status = label("", 18f).also { col.addView(it) }
-        startBtn = button("Start walk") { startHere() }.also { col.addView(it) }
-        stopBtn = button("End walk") { WalkService.send(this, WalkService.ACTION_STOP); main.postDelayed({ render() }, 800) }.also { col.addView(it) }
-        extendBtn = button("Extend (no time limit)") { WalkService.send(this, WalkService.ACTION_EXTEND); main.postDelayed({ render() }, 500) }.also { col.addView(it) }
-
-        col.addView(label("Family code (same as in Puppy Log)", 14f, true))
-        familyIn = EditText(this).apply { setText(prefs.family); inputType = InputType.TYPE_CLASS_TEXT; setSingleLine() }.also { col.addView(it) }
-        col.addView(label("Your name", 14f, true))
-        whoIn = EditText(this).apply { setText(prefs.who); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS; setSingleLine() }.also { col.addView(it) }
-        col.addView(button("Save") { saveFields(); toast("Saved") })
-
-        col.addView(label("Strava", 18f, true))
-        stravaStatus = label("").also { col.addView(it) }
-        connectBtn = button("Connect Strava") { connectStrava() }.also { col.addView(it) }
-        autoUpload = CheckBox(this).apply {
-            text = "Upload my walks to Strava automatically"
-            setOnCheckedChangeListener { _, c -> prefs.autoUpload = c }
-        }.also { col.addView(it) }
-        retryBtn = button("Upload waiting walks") { retryUploads(quiet = false) }.also { col.addView(it) }
-        col.addView(label("Strava can't make uploads private through its API. Walks are hidden from followers' feeds; to make them fully private set your default activity visibility to \"Only You\" in Strava's Privacy Controls.", 12f))
-
-        col.addView(label("Reliability", 18f, true))
-        col.addView(button("Let it run in the background (battery)") { askBatteryExemption() })
-        col.addView(label("Recommended on Samsung phones, otherwise the phone may stop the recording when the screen is off.", 12f))
-
-        setContentView(ScrollView(this).apply { addView(col); isFillViewport = true })
-        col.gravity = Gravity.TOP
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    override fun onDestroy() {
-        io.shutdown()
-        super.onDestroy()
+    // ---------------------------------------------------------------- JS bridge
+
+    /** Methods the page can call as window.PuppyNative.xxx(). They arrive off the main thread. */
+    inner class Bridge {
+        @JavascriptInterface fun isApp(): Boolean = true
+
+        @JavascriptInterface fun startWalk(eventId: String, family: String, by: String, ts: String) {
+            main.post { this@MainActivity.startWalk(eventId, family, by, ts.toLongOrNull() ?: System.currentTimeMillis()) }
+        }
+
+        /** Event id of the walk being GPS-recorded on this phone, or "". */
+        @JavascriptInterface fun recordingEvent(): String = Prefs(this@MainActivity).activeEvent
+
+        @JavascriptInterface fun stopWalk() {
+            main.post { WalkService.send(this@MainActivity, WalkService.ACTION_STOP) }
+        }
+
+        @JavascriptInterface fun openSettings() {
+            main.post { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+
+        @JavascriptInterface fun askNotifications() {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                main.post { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY) }
+            }
+        }
+
+        @JavascriptInterface fun notify(title: String, body: String) {
+            val open = PendingIntent.getActivity(this@MainActivity, 0, Intent(this@MainActivity, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            getSystemService(NotificationManager::class.java).notify(31,
+                Notification.Builder(this@MainActivity, CH_BAGS).setSmallIcon(R.drawable.ic_paw)
+                    .setContentTitle(title).setContentText(body).setAutoCancel(true).setContentIntent(open).build())
+        }
+
+        @JavascriptInterface fun copy(text: String) {
+            main.post {
+                getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Puppy Log", text))
+            }
+        }
+
+        @JavascriptInterface fun saveFile(name: String, mime: String, text: String, open: Boolean) {
+            main.post { this@MainActivity.saveFile(name, mime, text, open) }
+        }
     }
 }
