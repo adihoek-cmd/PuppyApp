@@ -21,6 +21,7 @@
     if (r) r.innerHTML = '<div style="font:15px/1.5 -apple-system,system-ui,sans-serif;padding:28px;color:#7c2d12;max-width:540px;margin:40px auto;text-align:center"><div style="font-size:30px">⚠️</div><b>Puppy Log hit a snag</b><br><br>' + msg + '<br><br><span style="color:#a8a29e;font-size:13px">Open this page on a laptop, press F12 then Console, and send me the red error text.</span></div>';
   }
   window.addEventListener("error", function (e) {
+    if (e.target && e.target.dataset && e.target.dataset.optional) return; // e.g. the map library — the app works without it
     if (e.target && (e.target.tagName === "SCRIPT" || e.target.tagName === "LINK")) {
       show('A required file failed to load:<br><code style="font-size:12px">' + (e.target.src || e.target.href) + '</code><br><br>Usually a network/CDN hiccup, try refreshing.');
     } else if (e.message) { show(e.message); }
@@ -55,10 +56,12 @@
 <style>
   html, body { -webkit-tap-highlight-color: transparent; }
   body { overscroll-behavior-y: none; }
+  /* Tailwind's base styles squash Leaflet's map tiles; undo that inside maps. */
+  .leaflet-container img { max-width: none !important; max-height: none !important; }
 </style>
 </head>
 <body>
 <div id="root"><div style="font:15px -apple-system,system-ui,sans-serif;color:#b45309;text-align:center;margin-top:46vh">🐶 Loading Puppy Log…</div></div>
-<script src="app.js?v=19"></script>
+<script src="app.js?v=20"></script>
 </body>
 </html>

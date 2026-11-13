@@ -7,15 +7,30 @@
  * index.html, so this file has no imports. Firebase config lives in index.html
  * (window.PUPPY_CONFIG) and is never touched by rebuilding app.js.
  */
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.1";
+const APP_VERSION = "2.2";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
 const NATIVE = (typeof window !== "undefined" && window.PuppyNative) ? window.PuppyNative : null;
+
+// Top tabs. Each device picks which to show (Log always, 2–4 in total) in ⚙ Settings.
+const ALL_TABS = [["log", "📋 Log"], ["charts", "📊 Charts"], ["map", "🗺️ Map"], ["sleep", "😴 Sleep"], ["trends", "💡 Trends"]];
+const TABS_KEY = "puppy-tabs";
+const DEFAULT_TABS = ["log", "charts", "map", "trends"];
+function loadTabs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TABS_KEY) || "null");
+    if (Array.isArray(v)) {
+      const ok = ALL_TABS.map(([id]) => id).filter((id) => id === "log" || v.includes(id)).slice(0, 4);
+      if (ok.length >= 2) return ok;
+    }
+  } catch (err) { /* fall back to defaults */ }
+  return DEFAULT_TABS;
+}
 
 // ---- poop-bag roll ----
 // State lives in its own doc (meta/bags) so nothing is ever written to the
@@ -242,6 +257,84 @@ function downloadJSON(filename, obj) {
   } catch (e) { console.error(e); }
 }
 
+// ============================ MAPS ============================
+// Walk routes recorded by the Android app live in families/{code}/routes/{walkEventId}
+// as an encoded polyline (pts). Leaflet is loaded only when a map is shown.
+function decodePolyline(str) {
+  const out = []; let i = 0, lat = 0, lng = 0;
+  while (str && i < str.length) {
+    for (const which of [0, 1]) {
+      let shift = 0, result = 0, b;
+      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (which === 0) lat += d; else lng += d;
+    }
+    out.push([lat / 1e5, lng / 1e5]);
+  }
+  return out;
+}
+let leafletPromise = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve(window.L);
+  if (leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet"; css.dataset.optional = "1";
+    css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.dataset.optional = "1";
+    js.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+    js.onload = () => resolve(window.L);
+    js.onerror = () => { leafletPromise = null; reject(new Error("map library didn't load")); };
+    document.head.appendChild(js);
+  });
+  return leafletPromise;
+}
+// heat = many faint red lines that build up where you walk most; otherwise one green route.
+function RouteMap({ lines, height, interactive, heat }) {
+  const box = useRef(null), map = useRef(null), layer = useRef(null);
+  const [ready, setReady] = useState(false); // true once this component's own map exists
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    loadLeaflet().then((L) => {
+      if (dead || !box.current) return;
+      const m = L.map(box.current, { zoomControl: !!interactive, dragging: !!interactive, touchZoom: !!interactive,
+        doubleClickZoom: !!interactive, scrollWheelZoom: false, boxZoom: false, keyboard: false });
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(m);
+      map.current = m; layer.current = L.layerGroup().addTo(m); setReady(true);
+    }).catch(() => !dead && setFailed(true));
+    return () => { dead = true; if (map.current) { map.current.remove(); map.current = null; } };
+  }, []);
+  useEffect(() => {
+    const L = window.L, m = map.current;
+    if (!ready || !L || !m) return;
+    layer.current.clearLayers();
+    const all = [];
+    lines.forEach((pts) => {
+      if (!pts || pts.length < 2) return;
+      L.polyline(pts, heat ? { color: "#dc2626", weight: 4, opacity: 0.25, lineCap: "round", lineJoin: "round" }
+        : { color: "#059669", weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round" }).addTo(layer.current);
+      all.push(...pts);
+    });
+    if (!heat && lines[0] && lines[0].length > 1) {
+      const p = lines[0];
+      L.circleMarker(p[0], { radius: 6, color: "#fff", weight: 2, fillColor: "#059669", fillOpacity: 1 }).addTo(layer.current);
+      L.circleMarker(p[p.length - 1], { radius: 6, color: "#fff", weight: 2, fillColor: "#b91c1c", fillOpacity: 1 }).addTo(layer.current);
+    }
+    if (all.length) m.fitBounds(L.latLngBounds(all), { padding: [18, 18], maxZoom: 17 });
+    else m.setView([31.77, 35.21], 12);
+    setTimeout(() => m.invalidateSize(), 60);
+  }, [ready, lines, heat]);
+  return (
+    <div className="relative isolate w-full overflow-hidden rounded-2xl bg-stone-100" style={{ height }}>
+      <div ref={box} className="absolute inset-0" />
+      {failed ? <div className="absolute inset-0 flex items-center justify-center text-xs text-stone-400">Map couldn't load — check the connection</div> : null}
+    </div>
+  );
+}
+
 // ============================ ROOT ============================
 function App() {
   if (NEEDS_SETUP) return <SetupScreen />;
@@ -310,6 +403,12 @@ function Tracker({ family, onLeave }) {
   const [config, setConfig] = useState({ puppyName: "our puppy", customTypes: [] });
   const [who, setWho] = useState(() => localStorage.getItem("puppy-who") || "");
   const [tab, setTab] = useState("log");
+  const [tabs, setTabsState] = useState(loadTabs);
+  const setTabs = (list) => {
+    setTabsState(list);
+    try { localStorage.setItem(TABS_KEY, JSON.stringify(list)); } catch (err) { /* private mode */ }
+    if (!list.includes(tab)) setTab("log");
+  };
   const [now, setNow] = useState(Date.now());
   const [editTarget, setEditTarget] = useState(null);
   const [editingPuppy, setEditingPuppy] = useState(false);
@@ -650,8 +749,8 @@ function Tracker({ family, onLeave }) {
         </div>
 
         {/* Tabs */}
-        <div className="mb-4 grid grid-cols-4 gap-1 rounded-2xl bg-white/60 p-1 shadow-sm">
-          {[["log", "📋 Log"], ["charts", "📊 Charts"], ["sleep", "😴 Sleep"], ["trends", "💡 Trends"]].map(([id, lbl]) => (
+        <div className="mb-4 grid gap-1 rounded-2xl bg-white/60 p-1 shadow-sm" style={{ gridTemplateColumns: "repeat(" + tabs.length + ", minmax(0, 1fr))" }}>
+          {ALL_TABS.filter(([id]) => tabs.includes(id)).map(([id, lbl]) => (
             <button key={id} onClick={() => setTab(id)} className={"rounded-xl px-1 py-2 text-xs font-semibold transition-colors " + (tab === id ? "bg-white text-amber-700 shadow-sm" : "text-stone-500")}>{lbl}</button>
           ))}
         </div>
@@ -739,7 +838,10 @@ function Tracker({ family, onLeave }) {
             {/* End the last untimed walk */}
             {openWalk ? (
               <button onClick={endWalk} className="mb-3 flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50 py-2.5 text-sm font-bold text-emerald-700 shadow-sm transition-transform active:scale-95 active:bg-emerald-100">
-                <span>⏱️</span>End previous walk · {fmtDur(now - openWalk.ts)}
+                <span>⏱️</span>End previous walk · {fmtDur(now - openWalk.ts)}{(() => {
+                  const m = NATIVE && NATIVE.liveDistance && NATIVE.recordingEvent() === openWalk.id ? NATIVE.liveDistance() : (openWalk.distanceM || 0);
+                  return m > 0 ? " · " + fmtDist(m) : "";
+                })()}
               </button>
             ) : null}
 
@@ -823,6 +925,8 @@ function Tracker({ family, onLeave }) {
           <ChartsView days={days} stats={stats} byHour={byHour} intervals={intervals} hasData={events.length > 0} />
         ) : tab === "sleep" ? (
           <SleepView events={events} now={now} />
+        ) : tab === "map" ? (
+          <MapView famRef={famRef} now={now} />
         ) : (
           <TrendsView events={events} now={now} puppyName={puppyName} />
         )}
@@ -831,7 +935,7 @@ function Tracker({ family, onLeave }) {
       </div>
 
       {editTarget && (
-        <EditSheet target={editTarget} customTypes={customTypes}
+        <EditSheet target={editTarget} customTypes={customTypes} famRef={famRef}
           onClose={() => setEditTarget(null)}
           onSave={(data) => { saveEvent(data); setEditTarget(null); }}
           onDelete={editTarget.isNew ? null : () => { removeEvent(editTarget.id); setEditTarget(null); }} />
@@ -848,7 +952,7 @@ function Tracker({ family, onLeave }) {
       )}
       {showSettings && (
         <SettingsSheet family={family} customTypes={customTypes} onRemoveCustom={removeCustomType} onExport={exportData} onLeave={onLeave}
-          bagSize={bagSize} onSetBagSize={setRollSize} onClose={() => setShowSettings(false)} />
+          bagSize={bagSize} onSetBagSize={setRollSize} tabs={tabs} onSetTabs={setTabs} onClose={() => setShowSettings(false)} />
       )}
     </div>
   );
@@ -980,6 +1084,35 @@ function Legend({ items }) {
 }
 
 // ============================ SLEEP ============================
+// Heatmap of walk routes — the more often a street is walked, the redder it gets.
+function MapView({ famRef, now }) {
+  const [range, setRange] = useState(30);
+  const [routes, setRoutes] = useState(null);
+  useEffect(() => {
+    let q = famRef.collection("routes");
+    if (range) q = q.where("ts", ">=", Date.now() - range * 86400000);
+    return q.onSnapshot((snap) => setRoutes(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), () => setRoutes([]));
+  }, [range]);
+  const lines = useMemo(() => (routes || []).map((r) => decodePolyline(r.pts || "")).filter((p) => p.length > 1), [routes]);
+  const totalM = (routes || []).reduce((s, r) => s + (Number(r.distanceM) || 0), 0);
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1.5">
+        {[[7, "7 days"], [30, "30 days"], [365, "Year"], [0, "All"]].map(([d, lbl]) => (
+          <button key={d} onClick={() => setRange(d)}
+            className={"flex-1 rounded-xl py-2 text-xs font-semibold " + (range === d ? "bg-white text-amber-700 shadow-sm" : "bg-white/50 text-stone-500")}>{lbl}</button>
+        ))}
+      </div>
+      <RouteMap lines={lines} height={430} interactive heat />
+      <div className="text-center text-xs text-stone-500">
+        {routes === null ? "Loading routes…"
+          : lines.length ? <span><b>{lines.length}</b> walk{lines.length === 1 ? "" : "s"} · <b>{fmtDist(totalM)}</b> — redder = walked more often</span>
+            : "No routes yet. Walks recorded with GPS in the Puppy Log Android app show up here."}
+      </div>
+    </div>
+  );
+}
+
 function SleepView({ events, now }) {
   const stuck = events.some((e) => e.type === "sleep" && e.ongoing && !e.end && now - e.ts > STUCK_MS);
   const notice = stuck ? (
@@ -1249,7 +1382,18 @@ function Sheet({ title, onClose, children }) {
   );
 }
 
-function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
+function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
+  // Route of this walk, if it was GPS-recorded in the Android app.
+  const [route, setRoute] = useState(null);
+  useEffect(() => {
+    if (target.isNew || target.type !== "walk" || !famRef) return;
+    let dead = false;
+    famRef.collection("routes").doc(target.id).get()
+      .then((d) => { if (!dead && d.exists && d.data().pts) setRoute(decodePolyline(d.data().pts)); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [target.id]);
+  const routeLines = useMemo(() => (route ? [route] : []), [route]);
   const [type, setType] = useState(target.type || "pee");
   const [when, setWhen] = useState(toLocalInput(target.ts || Date.now()));
   const [endWhen, setEndWhen] = useState(target.end ? toLocalInput(target.end) : "");
@@ -1312,6 +1456,12 @@ function EditSheet({ target, customTypes, onSave, onDelete, onClose }) {
 
       {type === "walk" && (
         <>
+          {route && route.length > 1 ? (
+            <div className="mb-4">
+              <RouteMap lines={routeLines} height={170} interactive={false} />
+              <p className="mt-1 text-[11px] text-stone-400">🟢 start · 🔴 end</p>
+            </div>
+          ) : null}
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Walk length</label>
           <div className="mb-2 flex flex-wrap gap-1.5">
             {[5, 10, 15, 20, 30, 45, 60].map((m) => (
@@ -1439,7 +1589,12 @@ function BagsSheet({ left, used, size, started, startedTs, onStart, onAdjust, on
   );
 }
 
-function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, onClose }) {
+function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave, bagSize, onSetBagSize, tabs, onSetTabs, onClose }) {
+  const toggleTab = (id) => {
+    if (id === "log") return;
+    if (tabs.includes(id)) { if (tabs.length > 2) onSetTabs(tabs.filter((t) => t !== id)); }
+    else if (tabs.length < 4) onSetTabs(ALL_TABS.map(([t]) => t).filter((t) => t === id || tabs.includes(t)));
+  };
   const [copied, setCopied] = useState(false);
   const copy = () => { if (NATIVE) NATIVE.copy(family); else if (navigator.clipboard) navigator.clipboard.writeText(family); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   return (
@@ -1482,6 +1637,24 @@ function SettingsSheet({ family, customTypes, onRemoveCustom, onExport, onLeave,
           ))}
         </div>
         <p className="mt-1.5 text-xs text-stone-400">Applies to the current roll too, so you can fix it if you picked the wrong size.</p>
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone-400">Tabs at the top (this device)</div>
+        <div className="flex flex-wrap gap-1.5">
+          {ALL_TABS.map(([id, lbl]) => {
+            const on = tabs.includes(id);
+            const locked = id === "log" || (on && tabs.length <= 2) || (!on && tabs.length >= 4);
+            return (
+              <button key={id} onClick={() => toggleTab(id)}
+                className={"rounded-full border px-3 py-1.5 text-xs font-semibold " + (on
+                  ? "border-amber-300 bg-amber-50 text-amber-700" : "border-stone-200 bg-white text-stone-500") + (locked ? " opacity-60" : "")}>
+                {on ? "✓ " : ""}{lbl}
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-1.5 text-xs text-stone-400">Pick 2–4. Log is always there.</p>
       </div>
 
       {NATIVE && (

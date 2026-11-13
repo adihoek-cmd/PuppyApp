@@ -75,6 +75,30 @@ class Firestore(ctx: Context) {
         if (!r.ok) throw RuntimeException("Couldn't save the walk (${r.code}): ${r.body.take(200)}")
     }
 
+    /** Live distance while walking, so everyone sees it next to "End previous walk". */
+    fun liveDistance(family: String, eventId: String, distanceM: Int) {
+        if (distanceM <= 0) return
+        val fields = JSONObject().put("distanceM", JSONObject().put("integerValue", distanceM.toString()))
+        val url = eventsUrl(family) + "/" + Net.enc(eventId) + "?updateMask.fieldPaths=distanceM&currentDocument.exists=true"
+        Net.request("PATCH", url, JSONObject().put("fields", fields).toString().toByteArray(), auth())
+    }
+
+    /**
+     * The walk's route for the minimap / heatmap: families/{f}/routes/{eventId}
+     * (its own collection — the events schema is untouched). pts = encoded polyline.
+     */
+    fun saveRoute(family: String, eventId: String, pts: String, ts: Long, durationMin: Int, distanceM: Int, by: String) {
+        val fields = JSONObject()
+            .put("pts", JSONObject().put("stringValue", pts))
+            .put("ts", JSONObject().put("integerValue", ts.toString()))
+            .put("durationMin", JSONObject().put("integerValue", durationMin.toString()))
+            .put("distanceM", JSONObject().put("integerValue", distanceM.toString()))
+            .put("by", JSONObject().put("stringValue", by.ifBlank { "Someone" }))
+        val url = "https://firestore.googleapis.com/v1/projects/${Config.PROJECT}/databases/(default)/documents/families/${Net.enc(family)}/routes/${Net.enc(eventId)}"
+        val r = Net.request("PATCH", url, JSONObject().put("fields", fields).toString().toByteArray(), auth())
+        if (!r.ok) throw RuntimeException("Couldn't save the route (${r.code}): ${r.body.take(200)}")
+    }
+
     /** durationMin someone else set on this walk (e.g. "End walk" in the PWA), or null. Missing event → -1. */
     fun externalDuration(family: String, eventId: String): Int? {
         val r = Net.request("GET", eventsUrl(family) + "/" + Net.enc(eventId), null, auth())

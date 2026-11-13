@@ -186,6 +186,7 @@ class WalkService : Service(), LocationListener {
             lastRemoteCheck = now
             val fam = prefs.activeFamily; val ev = prefs.activeEvent
             io.execute {
+                runCatching { Firestore(this).liveDistance(fam, ev, Track.distanceM(points.read())) }
                 val d = try { Firestore(this).externalDuration(fam, ev) } catch (e: Exception) { null }
                 if (d != null) main.post {
                     if (prefs.recording && prefs.activeEvent == ev && !finishing) {
@@ -236,6 +237,15 @@ class WalkService : Service(), LocationListener {
                     Firestore(this).finishWalk(fam, ev, if (keepDuration) null else minutes, meters)
                     saved = true; break
                 } catch (e: Exception) { Thread.sleep(3000L * (attempt + 1)) }
+            }
+
+            // Route for Puppy Log's minimap + heatmap (only when there's a real route).
+            if (Track.good(track).size >= 10 && meters >= 50) {
+                val pts = Track.encodePolyline(Track.mapPoints(track))
+                for (attempt in 0 until 3) {
+                    try { Firestore(this).saveRoute(fam, ev, pts, start, minutes, meters, prefs.who); break }
+                    catch (e: Exception) { Thread.sleep(2000L * (attempt + 1)) }
+                }
             }
 
             var strava = ""

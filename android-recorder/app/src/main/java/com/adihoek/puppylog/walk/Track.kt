@@ -14,6 +14,7 @@ object Track {
     const val MAX_ACCURACY_M = 35f   // ignore fixes worse than this
     const val MIN_STEP_M = 8.0       // GPS jitter below this isn't counted as distance
     const val SMOOTH_N = 5           // fixes averaged per position
+    const val MAP_STEP_M = 10.0      // route point spacing stored for the map
     const val REST_RADIUS_M = 40.0   // "stayed in one place" radius for auto-stop trimming
 
     fun dist(a: Pt, b: Pt): Double {
@@ -70,6 +71,36 @@ object Track {
     }
 
     fun trimTo(points: List<Pt>, endT: Long): List<Pt> = points.filter { it.t <= endT }
+
+    // ---- compact route for Puppy Log's minimap / heatmap ----
+
+    /** Smoothed route thinned to a point every ~MAP_STEP_M metres (plus the last point). */
+    fun mapPoints(points: List<Pt>): List<Pt> {
+        val sm = smooth(points)
+        if (sm.size < 2) return sm
+        val out = mutableListOf(sm[0])
+        for (i in 1 until sm.size) if (dist(out.last(), sm[i]) >= MAP_STEP_M) out += sm[i]
+        if (out.last() !== sm.last()) out += sm.last()
+        return out
+    }
+
+    /** Google encoded-polyline format (precision 5) — a few KB for a long walk. */
+    fun encodePolyline(points: List<Pt>): String {
+        val sb = StringBuilder()
+        var pLat = 0L; var pLon = 0L
+        for (p in points) {
+            val lat = Math.round(p.lat * 1e5); val lon = Math.round(p.lon * 1e5)
+            enc(lat - pLat, sb); enc(lon - pLon, sb)
+            pLat = lat; pLon = lon
+        }
+        return sb.toString()
+    }
+
+    private fun enc(v: Long, sb: StringBuilder) {
+        var x = if (v < 0) (v shl 1).inv() else (v shl 1)
+        while (x >= 0x20) { sb.append(((0x20 or (x and 0x1f).toInt()) + 63).toChar()); x = x shr 5 }
+        sb.append((x.toInt() + 63).toChar())
+    }
 
     fun durationMin(startMs: Long, endMs: Long): Int =
         maxOf(1, ((endMs - startMs) / 60000.0).roundToInt())
