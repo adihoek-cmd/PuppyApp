@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.3";
+const APP_VERSION = "2.4";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -273,6 +273,27 @@ function decodePolyline(str) {
   }
   return out;
 }
+// Base maps (free, no keys). heat = route colour that stands out on that background.
+const BASEMAPS = {
+  standard: { label: "🗺️ Standard", url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", max: 19,
+    attr: "© OpenStreetMap", heat: "#dc2626" },
+  light: { label: "🤍 Light", url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", max: 20,
+    attr: "© OpenStreetMap © CARTO", heat: "#dc2626" },
+  voyager: { label: "🧭 Voyager", url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", max: 20,
+    attr: "© OpenStreetMap © CARTO", heat: "#dc2626" },
+  dark: { label: "🌙 Dark", url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", max: 20,
+    attr: "© OpenStreetMap © CARTO", heat: "#fb923c" },
+  satellite: { label: "🛰️ Satellite", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", max: 19,
+    attr: "Tiles © Esri", heat: "#facc15" },
+  topo: { label: "⛰️ Terrain", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", max: 17,
+    attr: "© OpenStreetMap © OpenTopoMap", heat: "#dc2626" },
+};
+const BASEMAP_KEY = "puppy-basemap";
+function loadBasemap() {
+  try { const v = localStorage.getItem(BASEMAP_KEY); if (v && BASEMAPS[v]) return v; } catch (err) { /* default */ }
+  return "standard";
+}
+
 let leafletPromise = null;
 function loadLeaflet() {
   if (window.L) return Promise.resolve(window.L);
@@ -292,8 +313,9 @@ function loadLeaflet() {
   return leafletPromise;
 }
 // heat = many faint red lines that build up where you walk most; otherwise one green route.
-function RouteMap({ lines, height, interactive, heat, flush }) {
-  const box = useRef(null), map = useRef(null), layer = useRef(null);
+function RouteMap({ lines, height, interactive, heat, flush, base }) {
+  const box = useRef(null), map = useRef(null), layer = useRef(null), tiles = useRef(null);
+  const bm = BASEMAPS[base] || BASEMAPS[loadBasemap()];
   const [ready, setReady] = useState(false); // true once this component's own map exists
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -302,11 +324,19 @@ function RouteMap({ lines, height, interactive, heat, flush }) {
       if (dead || !box.current) return;
       const m = L.map(box.current, { zoomControl: !!interactive, dragging: !!interactive, touchZoom: !!interactive,
         doubleClickZoom: !!interactive, scrollWheelZoom: false, boxZoom: false, keyboard: false });
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(m);
       map.current = m; layer.current = L.layerGroup().addTo(m); setReady(true);
     }).catch(() => !dead && setFailed(true));
     return () => { dead = true; if (map.current) { map.current.remove(); map.current = null; } };
   }, []);
+  // Base map tiles — swapped in place when the style changes.
+  useEffect(() => {
+    const L = window.L, m = map.current;
+    if (!ready || !L || !m) return;
+    if (tiles.current) m.removeLayer(tiles.current);
+    tiles.current = L.tileLayer(bm.url, { maxZoom: bm.max, attribution: bm.attr, subdomains: "abc" }).addTo(m);
+    tiles.current.bringToBack();
+    m.setMaxZoom(bm.max);
+  }, [ready, bm]);
   useEffect(() => {
     const L = window.L, m = map.current;
     if (!ready || !L || !m) return;
@@ -314,7 +344,7 @@ function RouteMap({ lines, height, interactive, heat, flush }) {
     const all = [];
     lines.forEach((pts) => {
       if (!pts || pts.length < 2) return;
-      L.polyline(pts, heat ? { color: "#dc2626", weight: 4, opacity: 0.25, lineCap: "round", lineJoin: "round" }
+      L.polyline(pts, heat ? { color: bm.heat, weight: 4, opacity: 0.3, lineCap: "round", lineJoin: "round" }
         : { color: "#059669", weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round" }).addTo(layer.current);
       all.push(...pts);
     });
@@ -323,10 +353,10 @@ function RouteMap({ lines, height, interactive, heat, flush }) {
       L.circleMarker(p[0], { radius: 6, color: "#fff", weight: 2, fillColor: "#059669", fillOpacity: 1 }).addTo(layer.current);
       L.circleMarker(p[p.length - 1], { radius: 6, color: "#fff", weight: 2, fillColor: "#b91c1c", fillOpacity: 1 }).addTo(layer.current);
     }
-    if (all.length) m.fitBounds(L.latLngBounds(all), { padding: [18, 18], maxZoom: 17 });
+    if (all.length) m.fitBounds(L.latLngBounds(all), { padding: [18, 18], maxZoom: Math.min(17, bm.max) });
     else m.setView([31.77, 35.21], 12);
     setTimeout(() => m.invalidateSize(), 60);
-  }, [ready, lines, heat]);
+  }, [ready, lines, heat, bm]);
   return (
     <div className={"relative isolate w-full overflow-hidden bg-stone-100" + (flush ? "" : " rounded-2xl")} style={{ height }}>
       <div ref={box} className="absolute inset-0" />
@@ -1087,6 +1117,8 @@ function Legend({ items }) {
 // Heatmap of walk routes — the more often a street is walked, the redder it gets.
 function MapView({ famRef, now }) {
   const [range, setRange] = useState(30);
+  const [base, setBaseState] = useState(loadBasemap);
+  const setBase = (b) => { setBaseState(b); try { localStorage.setItem(BASEMAP_KEY, b); } catch (err) { /* private mode */ } };
   const [routes, setRoutes] = useState(null);
   useEffect(() => {
     let q = famRef.collection("routes");
@@ -1103,7 +1135,14 @@ function MapView({ famRef, now }) {
             className={"flex-1 rounded-xl py-2 text-xs font-semibold " + (range === d ? "bg-white text-amber-700 shadow-sm" : "bg-white/50 text-stone-500")}>{lbl}</button>
         ))}
       </div>
-      <RouteMap lines={lines} height={430} interactive heat />
+      <RouteMap lines={lines} height={430} interactive heat base={base} />
+      <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
+        {Object.entries(BASEMAPS).map(([id, b]) => (
+          <button key={id} onClick={() => setBase(id)}
+            className={"shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold " + (base === id
+              ? "border-amber-300 bg-amber-50 text-amber-700" : "border-stone-200 bg-white text-stone-500")}>{b.label}</button>
+        ))}
+      </div>
       <div className="text-center text-xs text-stone-500">
         {routes === null ? "Loading routes…"
           : lines.length ? <span><b>{lines.length}</b> walk{lines.length === 1 ? "" : "s"} · <b>{fmtDist(totalM)}</b> — redder = walked more often</span>
@@ -1476,7 +1515,7 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
           {/* The walk's route (GPS walks from the Android app): full sheet width, ~¼ of the screen high. */}
           {route && route.length > 1 ? (
             <div className="-mx-5 mb-3">
-              <RouteMap lines={routeLines} height="25vh" interactive={false} flush />
+              <RouteMap lines={routeLines} height="25vh" interactive={false} flush base={loadBasemap()} />
               <p className="mt-1 px-5 text-[11px] text-stone-400">🟢 start · 🔴 end</p>
             </div>
           ) : null}
