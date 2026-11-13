@@ -118,9 +118,13 @@ class MainActivity : Activity() {
         web.saveState(outState)
     }
 
+    /** Back closes whatever is open in Puppy Log (sheet, Settings, other tab) before leaving the app. */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (web.canGoBack()) web.goBack() else @Suppress("DEPRECATION") super.onBackPressed()
+        web.evaluateJavascript("(window.__puppyBack && window.__puppyBack()) ? '1' : '0'") { r ->
+            if (r?.contains("1") == true) return@evaluateJavascript
+            if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
+        }
     }
 
     private fun offlinePage() = """

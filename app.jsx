@@ -11,7 +11,7 @@ const { useState, useEffect, useRef } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.0";
+const APP_VERSION = "2.1";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -325,6 +325,21 @@ function Tracker({ family, onLeave }) {
   const linkActionDone = useRef(false);
 
   const famRef = db.collection("families").doc(family);
+
+  // Android back button inside the app: close what's open first, then go back to the log tab.
+  // Returns true when it handled the press; false lets the app leave.
+  useEffect(() => {
+    window.__puppyBack = () => {
+      if (editTarget) { setEditTarget(null); return true; }
+      if (oneOff) { setOneOff(null); return true; }
+      if (showBags) { setShowBags(false); return true; }
+      if (showSettings) { setShowSettings(false); return true; }
+      if (editingPuppy) { setEditingPuppy(false); return true; }
+      if (editingWho) { setEditingWho(false); return true; }
+      if (tab !== "log") { setTab("log"); return true; }
+      return false;
+    };
+  });
 
   useEffect(() => {
     const unsubEv = famRef.collection("events").orderBy("ts", "desc").onSnapshot((snap) => {
