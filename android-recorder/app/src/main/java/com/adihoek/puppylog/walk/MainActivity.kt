@@ -68,6 +68,10 @@ class MainActivity : Activity() {
         web.settings.domStorageEnabled = true
         web.settings.userAgentString = web.settings.userAgentString + " PuppyLogApp/2"
         web.addJavascriptInterface(Bridge(), "PuppyNative")
+        // After every app update, drop the WebView cache so the newest website loads.
+        val ver = runCatching { packageManager.getPackageInfo(packageName, 0).versionName ?: "" }.getOrDefault("")
+        val sp = getSharedPreferences("app", MODE_PRIVATE)
+        if (sp.getString("cachedFor", "") != ver) { web.clearCache(true); sp.edit().putString("cachedFor", ver).apply() }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, req: WebResourceRequest): Boolean {
                 val u = req.url
@@ -116,8 +120,11 @@ class MainActivity : Activity() {
         if (intent.data?.scheme == "puppylogwalk") web.loadUrl(urlFor(intent))
     }
 
-    private fun urlFor(i: Intent?): String =
-        if (i?.data?.scheme == "puppylogwalk" && i.data?.host == "start-walk") "$HOME?action=start-walk" else HOME
+    // A fresh query each launch so a cached old index.html is never shown (app.js is versioned).
+    private fun urlFor(i: Intent?): String {
+        val fresh = "app=" + System.currentTimeMillis()
+        return if (i?.data?.scheme == "puppylogwalk" && i.data?.host == "start-walk") "$HOME?action=start-walk&$fresh" else "$HOME?$fresh"
+    }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
