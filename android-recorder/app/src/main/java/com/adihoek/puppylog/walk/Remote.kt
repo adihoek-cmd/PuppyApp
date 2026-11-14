@@ -87,9 +87,10 @@ class Firestore(ctx: Context) {
      * The walk's route for the minimap / heatmap: families/{f}/routes/{eventId}
      * (its own collection — the events schema is untouched). pts = encoded polyline.
      */
-    fun saveRoute(family: String, eventId: String, pts: String, ts: Long, durationMin: Int, distanceM: Int, by: String) {
+    fun saveRoute(family: String, eventId: String, pts: String, tt: String, ts: Long, durationMin: Int, distanceM: Int, by: String) {
         val fields = JSONObject()
             .put("pts", JSONObject().put("stringValue", pts))
+            .put("tt", JSONObject().put("stringValue", tt))
             .put("ts", JSONObject().put("integerValue", ts.toString()))
             .put("durationMin", JSONObject().put("integerValue", durationMin.toString()))
             .put("distanceM", JSONObject().put("integerValue", distanceM.toString()))

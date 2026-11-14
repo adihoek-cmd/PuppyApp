@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.5";
+const APP_VERSION = "2.6";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -294,6 +294,51 @@ function loadBasemap() {
   return "standard";
 }
 
+// Where the dog was at time `ts`: from the per-point times when the route has them
+// (tt = seconds from the route's start), else assuming a steady pace over the walk.
+function routePosAt(route, ts) {
+  const pts = route.pts;
+  if (!pts || !pts.length) return null;
+  if (pts.length === 1) return pts[0];
+  const lerp = (a, b, f) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+  const sec = (ts - route.ts) / 1000;
+  if (route.tt && route.tt.length === pts.length) {
+    if (sec <= route.tt[0]) return pts[0];
+    for (let i = 1; i < pts.length; i++) {
+      if (route.tt[i] >= sec) {
+        const span = route.tt[i] - route.tt[i - 1];
+        return lerp(pts[i - 1], pts[i], span > 0 ? (sec - route.tt[i - 1]) / span : 0);
+      }
+    }
+    return pts[pts.length - 1];
+  }
+  const d = (a, b) => Math.hypot(a[0] - b[0], (a[1] - b[1]) * Math.cos(a[0] * Math.PI / 180));
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + d(pts[i - 1], pts[i]));
+  const total = cum[cum.length - 1];
+  const dur = (route.durationMin || 0) * 60;
+  const f = dur > 0 ? Math.min(1, Math.max(0, sec / dur)) : 0;
+  const goal = f * total;
+  for (let i = 1; i < pts.length; i++) {
+    if (cum[i] >= goal) return lerp(pts[i - 1], pts[i], cum[i] > cum[i - 1] ? (goal - cum[i - 1]) / (cum[i] - cum[i - 1]) : 0);
+  }
+  return pts[pts.length - 1];
+}
+const hhmm = (ms) => { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+// Same day as `baseMs`, at the clock time "HH:MM".
+const atClock = (baseMs, hm) => {
+  const [h, m] = String(hm).split(":").map(Number);
+  if (isNaN(h) || isNaN(m)) return baseMs;
+  const d = new Date(baseMs); d.setHours(h, m, 0, 0); return d.getTime();
+};
+// Android back closes the topmost popup first (see __puppyBack).
+function usePopupBack(onClose) {
+  useEffect(() => {
+    window.__puppyPopup = onClose;
+    return () => { if (window.__puppyPopup === onClose) window.__puppyPopup = null; };
+  });
+}
+
 let leafletPromise = null;
 function loadLeaflet() {
   if (window.L) return Promise.resolve(window.L);
@@ -313,7 +358,7 @@ function loadLeaflet() {
   return leafletPromise;
 }
 // heat = many faint red lines that build up where you walk most; otherwise one green route.
-function RouteMap({ lines, height, interactive, heat, flush, base }) {
+function RouteMap({ lines, height, interactive, heat, flush, base, pins }) {
   const box = useRef(null), map = useRef(null), layer = useRef(null), tiles = useRef(null);
   const bm = BASEMAPS[base] || BASEMAPS[loadBasemap()];
   const [ready, setReady] = useState(false); // true once this component's own map exists
@@ -353,10 +398,17 @@ function RouteMap({ lines, height, interactive, heat, flush, base }) {
       L.circleMarker(p[0], { radius: 6, color: "#fff", weight: 2, fillColor: "#059669", fillOpacity: 1 }).addTo(layer.current);
       L.circleMarker(p[p.length - 1], { radius: 6, color: "#fff", weight: 2, fillColor: "#b91c1c", fillOpacity: 1 }).addTo(layer.current);
     }
+    // Entry pins (walk sheet): emoji in a white bubble, pointing at the spot.
+    (pins || []).forEach((pn) => {
+      const glyph = String(pn.glyph || "•").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      const icon = L.divIcon({ className: "", iconSize: [32, 40], iconAnchor: [16, 38],
+        html: '<div style="display:flex;flex-direction:column;align-items:center"><div style="width:30px;height:30px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;font-size:16px">' + glyph + '</div><div style="width:2px;height:8px;background:#44403c"></div></div>' });
+      L.marker(pn.pos, { icon, keyboard: false }).on("click", () => pn.onTap && pn.onTap()).addTo(layer.current);
+    });
     if (all.length) m.fitBounds(L.latLngBounds(all), { padding: [18, 18], maxZoom: Math.min(17, bm.max) });
     else m.setView([31.77, 35.21], 12);
     setTimeout(() => m.invalidateSize(), 60);
-  }, [ready, lines, heat, bm]);
+  }, [ready, lines, heat, bm, pins]);
   return (
     <div className={"relative isolate w-full overflow-hidden bg-stone-100" + (flush ? "" : " rounded-2xl")} style={{ height }}>
       <div ref={box} className="absolute inset-0" />
@@ -459,6 +511,7 @@ function Tracker({ family, onLeave }) {
   // Returns true when it handled the press; false lets the app leave.
   useEffect(() => {
     window.__puppyBack = () => {
+      if (window.__puppyPopup) { window.__puppyPopup(); return true; }
       if (editTarget) { setEditTarget(null); return true; }
       if (oneOff) { setOneOff(null); return true; }
       if (showBags) { setShowBags(false); return true; }
@@ -916,6 +969,7 @@ function Tracker({ family, onLeave }) {
                                     {placeBadge(e)}
                                     <span className="ml-2 text-xs font-normal text-stone-400">{e.by}</span>
                                   </div>
+                                  {e.note ? <div className="truncate text-xs italic text-stone-500">{e.note}</div> : null}
                                 </div>
                                 <span className="shrink-0 text-sm font-medium tabular-nums text-stone-500">{clockTime(e.ts)}</span>
                                 <span className="shrink-0 text-xs text-stone-300">✏️</span>
@@ -930,6 +984,7 @@ function Tracker({ family, onLeave }) {
                                         <div className="min-w-0 flex-1">
                                           <span className="text-sm font-medium text-stone-600">{CT.full}</span>
                                           {placeBadge(c)}
+                                          {c.note ? <div className="truncate text-xs italic text-stone-500">{c.note}</div> : null}
                                         </div>
                                         <span className="shrink-0 text-xs font-medium tabular-nums text-stone-400">{clockTime(c.ts)}</span>
                                       </button>
@@ -962,6 +1017,10 @@ function Tracker({ family, onLeave }) {
 
       {editTarget && (
         <EditSheet target={editTarget} customTypes={customTypes} famRef={famRef}
+          walkKids={editTarget.type === "walk" ? (childrenOf[editTarget.id] || []) : []}
+          onEditOneOff={(e) => { setEditTarget(null); setOneOff(e); }}
+          onPatchEvent={(id, data) => famRef.collection("events").doc(id).update(data)}
+          onRemoveEvent={(id) => removeEvent(id)}
           onClose={() => setEditTarget(null)}
           onSave={(data) => { saveEvent(data); setEditTarget(null); }}
           onDelete={editTarget.isNew ? null : () => { removeEvent(editTarget.id); setEditTarget(null); }} />
@@ -1417,17 +1476,30 @@ function Sheet({ title, onClose, children }) {
   );
 }
 
-function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
-  // Route of this walk, if it was GPS-recorded in the Android app.
-  const [route, setRoute] = useState(null);
+function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatchEvent, onRemoveEvent, onSave, onDelete, onClose }) {
+  // Route of this walk, if it was GPS-recorded in the Android app:
+  // undefined = still loading, null = none, else { pts, tt, ts, durationMin }.
+  const wantsRoute = !target.isNew && target.type === "walk" && !!famRef;
+  const [routeDoc, setRouteDoc] = useState(wantsRoute ? undefined : null);
+  const [classic, setClassic] = useState(false); // "Not a walk? Change type" → the regular form
   useEffect(() => {
-    if (target.isNew || target.type !== "walk" || !famRef) return;
+    if (!wantsRoute) return;
     let dead = false;
     famRef.collection("routes").doc(target.id).get()
-      .then((d) => { if (!dead && d.exists && d.data().pts) setRoute(decodePolyline(d.data().pts)); })
-      .catch(() => {});
+      .then((d) => {
+        if (dead) return;
+        const r = d.exists ? d.data() : null;
+        setRouteDoc(r && r.pts ? {
+          pts: decodePolyline(r.pts),
+          tt: r.tt ? String(r.tt).split(",").map(Number) : null,
+          ts: Number(r.ts) || target.ts,
+          durationMin: Number(r.durationMin) || target.durationMin || 0,
+        } : null);
+      })
+      .catch(() => !dead && setRouteDoc(null));
     return () => { dead = true; };
   }, [target.id]);
+  const route = routeDoc ? routeDoc.pts : null;
   const routeLines = useMemo(() => (route ? [route] : []), [route]);
   const [type, setType] = useState(target.type || "pee");
   const [when, setWhen] = useState(toLocalInput(target.ts || Date.now()));
@@ -1439,6 +1511,17 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
   const all = ["pee", "poop", "walk", "training", "sleep", ...customTypes.map((c) => c.id)];
   const isPotty = type === "pee" || type === "poop";
   const isSleep = type === "sleep";
+  if (routeDoc === undefined) {
+    return <Sheet title="Walk" onClose={onClose}><div className="py-10 text-center text-sm text-stone-400">Loading the route…</div></Sheet>;
+  }
+  if (routeDoc && route && route.length > 1 && !classic) {
+    return (
+      <WalkSheet target={target} routeDoc={routeDoc} routeLines={routeLines} kids={walkKids || []} customTypes={customTypes}
+        onSave={onSave} onDelete={onDelete} onClose={onClose} onChangeType={() => setClassic(true)}
+        onEditOneOff={onEditOneOff} onPatchEvent={onPatchEvent} onRemoveEvent={onRemoveEvent} />
+    );
+  }
+
   const save = () => {
     if (isSleep) {
       onSave({ id: isNew ? undefined : target.id, type, ts: fromLocalInput(when), end: endWhen ? fromLocalInput(endWhen) : undefined });
@@ -1491,22 +1574,26 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
 
       {type === "walk" && (
         <>
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Walk length</label>
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {[5, 10, 15, 20, 30, 45, 60].map((m) => (
-              <button key={m} onClick={() => setDur(m)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dur) === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m} min</button>
+          <div className="mb-3 flex items-center gap-1.5">
+            <label className="w-16 shrink-0 text-[11px] font-bold uppercase tracking-wide text-stone-500">Length</label>
+            {[15, 30, 45, 60].map((m) => (
+              <button key={m} onClick={() => setDur(m)} className={"h-10 w-10 shrink-0 rounded-lg text-xs font-semibold " + (Number(dur) === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m}</button>
             ))}
+            <div className="flex h-11 min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-white px-2 focus-within:border-emerald-400">
+              <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} className="w-full min-w-0 bg-transparent text-right text-sm font-semibold outline-none" aria-label="Minutes" />
+              <span className="text-xs text-stone-500">min</span>
+            </div>
           </div>
-          <input type="number" inputMode="numeric" value={dur} onChange={(e) => setDur(e.target.value)} placeholder="minutes (optional)" className="mb-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
-          <p className="mb-4 text-xs text-stone-400">Activities during the walk tuck underneath it. Without a length, anything in the next 10 minutes counts.</p>
-
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-stone-400">Distance</label>
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {[100, 250, 500, 750, 1000].map((mtr) => (
-              <button key={mtr} onClick={() => setDist(mtr)} className={"rounded-full px-3 py-1 text-xs font-semibold " + (Number(dist) === mtr ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{mtr < 1000 ? mtr + " m" : (mtr / 1000) + " km"}</button>
+          <div className="mb-4 flex items-center gap-1.5">
+            <label className="w-16 shrink-0 text-[11px] font-bold uppercase tracking-wide text-stone-500">Distance</label>
+            {[[500, "500"], [1000, "1k"], [2000, "2k"], [3000, "3k"]].map(([mtr, lbl]) => (
+              <button key={mtr} onClick={() => setDist(mtr)} className={"h-10 w-10 shrink-0 rounded-lg text-xs font-semibold " + (Number(dist) === mtr ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{lbl}</button>
             ))}
+            <div className="flex h-11 min-w-0 flex-1 items-center gap-1 rounded-xl border border-stone-200 bg-white px-2 focus-within:border-emerald-400">
+              <input type="number" inputMode="numeric" value={dist} onChange={(e) => setDist(e.target.value)} className="w-full min-w-0 bg-transparent text-right text-sm font-semibold outline-none" aria-label="Metres" />
+              <span className="text-xs text-stone-500">m</span>
+            </div>
           </div>
-          <input type="number" inputMode="numeric" value={dist} onChange={(e) => setDist(e.target.value)} placeholder="metres (optional)" className="mb-4 w-full rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-400" />
 
           {/* The walk's route (GPS walks from the Android app): full sheet width, ~¼ of the screen high. */}
           {route && route.length > 1 ? (
@@ -1523,6 +1610,191 @@ function EditSheet({ target, customTypes, famRef, onSave, onDelete, onClose }) {
         {onDelete && <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete">🗑️</button>}
       </div>
     </Sheet>
+  );
+}
+
+// ---- Walk with a GPS route: map first, pins for what happened on the walk ----
+function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, onDelete, onClose, onChangeType, onEditOneOff, onPatchEvent, onRemoveEvent }) {
+  const [start, setStart] = useState(target.ts);
+  const [dur, setDur] = useState(Number(target.durationMin) || routeDoc.durationMin || 0);
+  const [dist, setDist] = useState(Number(target.distanceM) || 0);
+  const [popup, setPopup] = useState(null); // "time" | "dist" | { pin: event }
+  const pins = useMemo(() => kids.map((e) => {
+    const pos = routePosAt(routeDoc, e.ts);
+    if (!pos) return null;
+    const T = resolveType(e.type, customTypes);
+    return { pos, glyph: e.type === "once" ? (e.glyph || "⭐") : T.glyph,
+      onTap: () => (e.type === "once" ? onEditOneOff(e) : setPopup({ pin: e })) };
+  }).filter(Boolean), [kids, routeDoc, customTypes]);
+  const speed = dur > 0 && dist > 0 ? (dist / 1000) / (dur / 60) : 0;
+  const dateLbl = new Date(start).toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short" });
+  const save = () => onSave({ id: target.id, type: "walk", ts: start, durationMin: dur || undefined, distanceM: dist || undefined });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={onClose}>
+      <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
+        <div className="relative">
+          <RouteMap lines={routeLines} height="34vh" interactive={false} flush base={loadBasemap()} pins={pins} />
+          <div className="pointer-events-none absolute inset-x-3 top-3 z-[500] flex items-start justify-between">
+            <div className="rounded-xl bg-white/95 px-2.5 py-1.5 shadow-sm">
+              <div className="text-sm font-bold text-stone-800">🐾 Walk</div>
+              <div className="text-xs text-stone-600">{dateLbl} · {hhmm(start)}{target.by ? " · " + target.by : ""}</div>
+            </div>
+            <button onClick={onClose} className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-stone-600 shadow-sm" aria-label="Close">✕</button>
+          </div>
+          <div className="absolute inset-x-3 bottom-3 z-[500] grid grid-cols-3 overflow-hidden rounded-2xl bg-white/95 shadow-sm">
+            <button onClick={() => setPopup("time")} className="flex flex-col items-center py-2 active:bg-stone-100" aria-label="Adjust walk time">
+              <span className="text-lg font-bold text-stone-800">{dur ? fmtDur(dur * 60000) : "—"}</span>
+              <span className="text-[11px] font-semibold text-emerald-700">time ✎</span>
+            </button>
+            <button onClick={() => setPopup("dist")} className="flex flex-col items-center border-x border-stone-200 py-2 active:bg-stone-100" aria-label="Adjust distance">
+              <span className="text-lg font-bold text-stone-800">{dist ? fmtDist(dist) : "—"}</span>
+              <span className="text-[11px] font-semibold text-emerald-700">distance ✎</span>
+            </button>
+            <div className="flex flex-col items-center py-2">
+              <span className="text-lg font-bold text-stone-800">{speed ? speed.toFixed(1) + " km/h" : "—"}</span>
+              <span className="text-[11px] font-semibold text-stone-500">avg speed</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 pt-3">
+          <button onClick={onChangeType} className="py-2 text-sm font-semibold text-amber-700">Not a walk? Change type</button>
+          <div className="mt-2 flex items-center gap-2">
+            <button onClick={save} className="flex-1 rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">Save changes</button>
+            {onDelete && <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete walk">🗑️</button>}
+          </div>
+        </div>
+      </div>
+
+      {popup === "time" && (
+        <WalkTimePopup start={start} dur={dur} onClose={() => setPopup(null)}
+          onSet={(st, d) => { setStart(st); setDur(d); setPopup(null); }} />
+      )}
+      {popup === "dist" && (
+        <DistancePopup dist={dist} onClose={() => setPopup(null)} onSet={(d) => { setDist(d); setPopup(null); }} />
+      )}
+      {popup && popup.pin && (
+        <PinPopup event={popup.pin} customTypes={customTypes} onClose={() => setPopup(null)}
+          onSave={(data) => { onPatchEvent(popup.pin.id, data); setPopup(null); }}
+          onDelete={() => { onRemoveEvent(popup.pin.id); setPopup(null); }} />
+      )}
+    </div>
+  );
+}
+
+function Popup({ title, onClose, children }) {
+  usePopupBack(onClose);
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-5" onClick={(e) => { e.stopPropagation(); onClose(); }}>
+      <div role="dialog" aria-label={title} className="w-full max-w-sm rounded-3xl bg-white p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="mb-3 text-lg font-bold text-stone-800">{title}</h3>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PopupButtons({ onCancel, onOk, okLabel, onDelete }) {
+  return (
+    <div className="mt-4 flex gap-2">
+      {onDelete ? <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete">🗑️</button> : null}
+      <button onClick={onCancel} className="flex-1 rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600 active:bg-stone-200">Cancel</button>
+      <button onClick={onOk} className="flex-1 rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">{okLabel || "Set"}</button>
+    </div>
+  );
+}
+
+// Start / end / length are kept in step: start moves the whole walk, end or length changes its length.
+function WalkTimePopup({ start, dur, onSet, onClose }) {
+  const [st, setSt] = useState(start);
+  const [d, setD] = useState(dur || 0);
+  const end = st + d * 60000;
+  const setEnd = (hm) => {
+    let e = atClock(st, hm);
+    if (e < st) e += 86400000; // past midnight
+    const st0 = st - (st % 60000); // the start as shown (whole minutes)
+    setD(Math.max(1, Math.round((e - st0) / 60000)));
+  };
+  return (
+    <Popup title="Walk time" onClose={onClose}>
+      <div className="mb-3 grid grid-cols-2 gap-2.5">
+        <label className="flex flex-col gap-1 text-xs font-semibold text-stone-500">Start
+          <input type="time" value={hhmm(st)} onChange={(e) => setSt(atClock(st, e.target.value))} className="h-12 rounded-xl border border-stone-300 px-3 text-lg font-semibold text-stone-800 outline-none focus:border-emerald-400" />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-semibold text-stone-500">End
+          <input type="time" value={hhmm(end)} onChange={(e) => setEnd(e.target.value)} className="h-12 rounded-xl border border-stone-300 px-3 text-lg font-semibold text-stone-800 outline-none focus:border-emerald-400" />
+        </label>
+      </div>
+      <div className="mb-1.5 text-xs font-semibold text-stone-500">Length</div>
+      <div className="mb-3 grid grid-cols-4 gap-2">
+        {[10, 15, 20, 30, 45, 60, 75, 90].map((m) => (
+          <button key={m} onClick={() => setD(m)} className={"h-11 rounded-xl text-sm font-semibold " + (d === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{m}</button>
+        ))}
+      </div>
+      <div className="flex items-center overflow-hidden rounded-2xl border-2 border-emerald-500">
+        <button onClick={() => setD(Math.max(1, d - 5))} className="h-12 w-14 bg-emerald-50 text-xl font-bold text-emerald-700" aria-label="5 minutes less">−</button>
+        <input type="number" inputMode="numeric" value={d || ""} onChange={(e) => setD(Math.max(0, Number(e.target.value) || 0))} aria-label="Minutes" className="w-full min-w-0 flex-1 text-right text-xl font-bold text-stone-800 outline-none" />
+        <span className="flex-1 pl-1.5 text-sm font-semibold text-stone-500">min</span>
+        <button onClick={() => setD(d + 5)} className="h-12 w-14 bg-emerald-50 text-xl font-bold text-emerald-700" aria-label="5 minutes more">+</button>
+      </div>
+      <PopupButtons onCancel={onClose} onOk={() => onSet(st, d)} />
+    </Popup>
+  );
+}
+
+function DistancePopup({ dist, onSet, onClose }) {
+  const [d, setD] = useState(dist || 0);
+  return (
+    <Popup title="Distance" onClose={onClose}>
+      <div className="mb-3 grid grid-cols-4 gap-2">
+        {[[250, "250 m"], [500, "500 m"], [750, "750 m"], [1000, "1 km"], [1500, "1.5 km"], [2000, "2 km"], [3000, "3 km"], [5000, "5 km"]].map(([m, lbl]) => (
+          <button key={m} onClick={() => setD(m)} className={"h-11 rounded-xl text-sm font-semibold " + (d === m ? "bg-emerald-500 text-white" : "bg-emerald-50 text-emerald-700")}>{lbl}</button>
+        ))}
+      </div>
+      <div className="flex items-center overflow-hidden rounded-2xl border-2 border-emerald-500">
+        <button onClick={() => setD(Math.max(0, d - 100))} className="h-12 w-14 bg-emerald-50 text-xl font-bold text-emerald-700" aria-label="100 metres less">−</button>
+        <input type="number" inputMode="numeric" value={d || ""} onChange={(e) => setD(Math.max(0, Number(e.target.value) || 0))} aria-label="Metres" className="w-full min-w-0 flex-1 text-right text-xl font-bold text-stone-800 outline-none" />
+        <span className="flex-1 pl-1.5 text-sm font-semibold text-stone-500">m</span>
+        <button onClick={() => setD(d + 100)} className="h-12 w-14 bg-emerald-50 text-xl font-bold text-emerald-700" aria-label="100 metres more">+</button>
+      </div>
+      <PopupButtons onCancel={onClose} onOk={() => onSet(d)} />
+    </Popup>
+  );
+}
+
+// An entry on the walk (tap its pin): type, time (moves the pin), note.
+function PinPopup({ event, customTypes, onSave, onDelete, onClose }) {
+  const [type, setType] = useState(event.type);
+  const [ts, setTs] = useState(event.ts);
+  const [note, setNote] = useState(event.note || "");
+  const opts = ["pee", "poop", "training", ...customTypes.map((c) => c.id)];
+  return (
+    <Popup title="Edit entry" onClose={onClose}>
+      <div className="mb-3 grid grid-cols-4 gap-1.5">
+        {opts.map((t) => {
+          const T = resolveType(t, customTypes);
+          return (
+            <button key={t} onClick={() => setType(t)} className={"flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl text-[11px] font-semibold " + (type === t ? T.btn : "bg-stone-100 text-stone-500")}>
+              <span className="text-lg leading-none">{T.glyph}</span><span className="w-full truncate px-1 text-center">{T.full}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="mb-3 flex items-center gap-2.5">
+        <span className="w-10 shrink-0 text-sm font-semibold text-stone-500">Time</span>
+        <div className="flex flex-1 items-center overflow-hidden rounded-xl border border-stone-300">
+          <button onClick={() => setTs(ts - 60000)} className="h-12 w-12 bg-stone-100 text-lg font-bold text-stone-600" aria-label="1 minute earlier">−</button>
+          <input type="time" value={hhmm(ts)} onChange={(e) => setTs(atClock(ts, e.target.value))} aria-label="Time" className="w-full min-w-0 flex-1 text-center text-lg font-bold text-stone-800 outline-none" />
+          <button onClick={() => setTs(ts + 60000)} className="h-12 w-12 bg-stone-100 text-lg font-bold text-stone-600" aria-label="1 minute later">+</button>
+        </div>
+      </div>
+      <label className="flex flex-col gap-1 text-sm font-semibold text-stone-500">Note
+        <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a note" className="resize-none rounded-xl border border-stone-300 px-3 py-2 text-base font-normal text-stone-800 outline-none focus:border-amber-400" />
+      </label>
+      <PopupButtons onCancel={onClose} okLabel="Save" onDelete={onDelete}
+        onOk={() => onSave({ type, ts, note: note.trim() ? note.trim() : FieldDelete })} />
+    </Popup>
   );
 }
 

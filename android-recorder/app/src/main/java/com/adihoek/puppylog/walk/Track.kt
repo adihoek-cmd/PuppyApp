@@ -84,6 +84,10 @@ object Track {
         return out
     }
 
+    /** Seconds from the walk's start for each map point, comma-separated (pins on the map use these). */
+    fun timeOffsets(points: List<Pt>, startMs: Long): String =
+        points.joinToString(",") { maxOf(0L, (it.t - startMs) / 1000).toString() }
+
     /** Google encoded-polyline format (precision 5) — a few KB for a long walk. */
     fun encodePolyline(points: List<Pt>): String {
         val sb = StringBuilder()

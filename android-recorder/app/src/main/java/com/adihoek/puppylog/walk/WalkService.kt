@@ -241,9 +241,11 @@ class WalkService : Service(), LocationListener {
 
             // Route for Puppy Log's minimap + heatmap (only when there's a real route).
             if (Track.good(track).size >= 10 && meters >= 50) {
-                val pts = Track.encodePolyline(Track.mapPoints(track))
+                val mp = Track.mapPoints(track)
+                val pts = Track.encodePolyline(mp)
+                val tt = Track.timeOffsets(mp, start)
                 for (attempt in 0 until 3) {
-                    try { Firestore(this).saveRoute(fam, ev, pts, start, minutes, meters, prefs.who); break }
+                    try { Firestore(this).saveRoute(fam, ev, pts, tt, start, minutes, meters, prefs.who); break }
                     catch (e: Exception) { Thread.sleep(2000L * (attempt + 1)) }
                 }
             }
