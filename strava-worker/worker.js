@@ -22,7 +22,12 @@ const PAIR_TTL = 600;            // seconds a finished pairing waits to be colle
 const MAX_GPX_BYTES = 5_000_000; // a 3-hour walk at 1 point/sec is ~1.5 MB
 
 export default {
-  async fetch(req, env) {
+  // Every 5 minutes: finish uploads Strava was still processing (set Walk + mute).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(finishPending(env));
+  },
+
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     try {
       if (req.method === "OPTIONS") return cors(new Response(null, { status: 204 }));
@@ -32,7 +37,7 @@ export default {
         case "/callback":     return callback(url, env);
         case "/pair":         return cors(await pair(url, env));
         case "/me":           return cors(await me(req, env));
-        case "/upload":       return cors(await upload(req, url, env));
+        case "/upload":       return cors(await upload(req, url, env, ctx));
         case "/upload-status":return cors(await uploadStatus(req, url, env));
         case "/disconnect":   return cors(await disconnect(req, env));
         default:              return text("Not found", 404);
@@ -124,7 +129,7 @@ async function me(req, env) {
 }
 
 // POST /upload?name=...&external_id=...   body = GPX
-async function upload(req, url, env) {
+async function upload(req, url, env, ctx) {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   const s = await loadConn(req, env);
   if (!s) return json({ error: "not connected" }, 401);
@@ -145,7 +150,55 @@ async function upload(req, url, env) {
   if (!r.ok) return json({ error: "Strava upload failed", status: r.status, detail: up }, 502);
 
   // Strava processes uploads asynchronously; wait briefly so we can mark it a Walk.
-  return json(await settleUpload(s.c.access_token, up.id_str || String(up.id), 4));
+  // Strava processes uploads asynchronously and can take a while. Wait a little now;
+  // if it's still processing, keep trying in the background and leave a note for the
+  // 5-minute job, so the walk always ends up as a muted Walk.
+  const uploadId = up.id_str || String(up.id);
+  const first = await settleUpload(s.c.access_token, uploadId, 4);
+  if (first.state === "processing") {
+    await env.STRAVA.put("pending:" + uploadId, JSON.stringify({ connKey: s.key, at: Date.now() }), { expirationTtl: 86400 });
+    if (ctx) ctx.waitUntil(settleLater(env, s.key, uploadId));
+  }
+  return json(first);
+}
+
+async function settleLater(env, connKey, uploadId) {
+  for (let i = 0; i < 8; i++) {
+    await new Promise((res) => setTimeout(res, 3000));
+    const r = await settlePending(env, connKey, uploadId);
+    if (r !== "processing") return;
+  }
+}
+
+// One attempt for a parked upload; clears its note once finished (or failed for good).
+async function settlePending(env, connKey, uploadId) {
+  const raw = await env.STRAVA.get(connKey);
+  if (!raw) { await env.STRAVA.delete("pending:" + uploadId); return "gone"; }
+  const s = await loadConnByKey(env, connKey, JSON.parse(raw));
+  const r = await settleUpload(s.access_token, uploadId, 1);
+  if (r.state !== "processing") await env.STRAVA.delete("pending:" + uploadId);
+  return r.state;
+}
+
+async function finishPending(env) {
+  const list = await env.STRAVA.list({ prefix: "pending:" });
+  for (const k of list.keys) {
+    try {
+      const v = JSON.parse((await env.STRAVA.get(k.name)) || "null");
+      if (v && v.connKey) await settlePending(env, v.connKey, k.name.slice("pending:".length));
+      else await env.STRAVA.delete(k.name);
+    } catch (e) { /* try again next run */ }
+  }
+}
+
+// Refresh a stored connection's token if it is close to expiry.
+async function loadConnByKey(env, key, c) {
+  if (!c.expires_at || c.expires_at - 3600 < Date.now() / 1000) {
+    const t = await tokenRequest(env, { grant_type: "refresh_token", refresh_token: c.refresh_token });
+    c.access_token = t.access_token; c.refresh_token = t.refresh_token; c.expires_at = t.expires_at;
+    await env.STRAVA.put(key, JSON.stringify(c));
+  }
+  return c;
 }
 
 // GET /upload-status?id=...  — for uploads that were still processing.
