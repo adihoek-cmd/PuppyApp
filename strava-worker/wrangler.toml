@@ -8,7 +8,3 @@ STRAVA_CLIENT_ID = "PASTE_CLIENT_ID_HERE"
 [[kv_namespaces]]
 binding = "STRAVA"
 id = "PASTE_KV_ID_HERE"
-
-# Finish Strava uploads that were still processing (set Walk + mute)
-[triggers]
-crons = ["*/5 * * * *"]

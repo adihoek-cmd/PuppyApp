@@ -22,7 +22,8 @@ const PAIR_TTL = 600;            // seconds a finished pairing waits to be colle
 const MAX_GPX_BYTES = 5_000_000; // a 3-hour walk at 1 point/sec is ~1.5 MB
 
 export default {
-  // Every 5 minutes: finish uploads Strava was still processing (set Walk + mute).
+  // Optional cron (not configured: the free plan's 5 cron triggers are in use elsewhere).
+  // Leftovers are finished on the next upload instead (see upload()).
   async scheduled(event, env, ctx) {
     ctx.waitUntil(finishPending(env));
   },
@@ -154,6 +155,8 @@ async function upload(req, url, env, ctx) {
   // if it's still processing, keep trying in the background and leave a note for the
   // 5-minute job, so the walk always ends up as a muted Walk.
   const uploadId = up.id_str || String(up.id);
+  // Also finish any earlier walk that Strava was still processing last time.
+  if (ctx) ctx.waitUntil(finishPending(env));
   const first = await settleUpload(s.c.access_token, uploadId, 4);
   if (first.state === "processing") {
     await env.STRAVA.put("pending:" + uploadId, JSON.stringify({ connKey: s.key, at: Date.now() }), { expirationTtl: 86400 });
