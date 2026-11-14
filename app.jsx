@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.6";
+const APP_VERSION = "2.7";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -358,7 +358,7 @@ function loadLeaflet() {
   return leafletPromise;
 }
 // heat = many faint red lines that build up where you walk most; otherwise one green route.
-function RouteMap({ lines, height, interactive, heat, flush, base, pins }) {
+function RouteMap({ lines, height, interactive, heat, flush, base, pins, fitPad }) {
   const box = useRef(null), map = useRef(null), layer = useRef(null), tiles = useRef(null);
   const bm = BASEMAPS[base] || BASEMAPS[loadBasemap()];
   const [ready, setReady] = useState(false); // true once this component's own map exists
@@ -405,7 +405,9 @@ function RouteMap({ lines, height, interactive, heat, flush, base, pins }) {
         html: '<div style="display:flex;flex-direction:column;align-items:center"><div style="width:30px;height:30px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;font-size:16px">' + glyph + '</div><div style="width:2px;height:8px;background:#44403c"></div></div>' });
       L.marker(pn.pos, { icon, keyboard: false }).on("click", () => pn.onTap && pn.onTap()).addTo(layer.current);
     });
-    if (all.length) m.fitBounds(L.latLngBounds(all), { padding: [18, 18], maxZoom: Math.min(17, bm.max) });
+    // fitPad = [top, bottom] px kept clear for overlays (title, stats); pins need ~40 px headroom.
+    const fit = fitPad ? { paddingTopLeft: [24, fitPad[0]], paddingBottomRight: [24, fitPad[1]] } : { padding: [18, 18] };
+    if (all.length) m.fitBounds(L.latLngBounds(all), { ...fit, maxZoom: Math.min(17, bm.max) });
     else m.setView([31.77, 35.21], 12);
     setTimeout(() => m.invalidateSize(), 60);
   }, [ready, lines, heat, bm, pins]);
@@ -1634,15 +1636,15 @@ function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, on
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={onClose}>
       <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
         <div className="relative">
-          <RouteMap lines={routeLines} height="34vh" interactive={false} flush base={loadBasemap()} pins={pins} />
-          <div className="pointer-events-none absolute inset-x-3 top-3 z-[500] flex items-start justify-between">
+          <RouteMap lines={routeLines} height="56vh" interactive={false} flush base={loadBasemap()} pins={pins} fitPad={[84, 104]} />
+          <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex items-start justify-between">
             <div className="rounded-xl bg-white/95 px-2.5 py-1.5 shadow-sm">
               <div className="text-sm font-bold text-stone-800">🐾 Walk</div>
               <div className="text-xs text-stone-600">{dateLbl} · {hhmm(start)}{target.by ? " · " + target.by : ""}</div>
             </div>
             <button onClick={onClose} className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-stone-600 shadow-sm" aria-label="Close">✕</button>
           </div>
-          <div className="absolute inset-x-3 bottom-3 z-[500] grid grid-cols-3 overflow-hidden rounded-2xl bg-white/95 shadow-sm">
+          <div className="absolute inset-x-3 bottom-3 z-10 grid grid-cols-3 overflow-hidden rounded-2xl bg-white/95 shadow-sm">
             <button onClick={() => setPopup("time")} className="flex flex-col items-center py-2 active:bg-stone-100" aria-label="Adjust walk time">
               <span className="text-lg font-bold text-stone-800">{dur ? fmtDur(dur * 60000) : "—"}</span>
               <span className="text-[11px] font-semibold text-emerald-700">time ✎</span>
