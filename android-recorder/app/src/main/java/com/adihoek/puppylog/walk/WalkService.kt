@@ -45,6 +45,7 @@ class WalkService : Service(), LocationListener {
         private const val ID_ONGOING = 1
         private const val ID_WARN = 2
         private const val ID_DONE = 3
+        private const val ID_SAVER = 4
 
         fun start(ctx: Context, eventId: String, family: String, startTs: Long) {
             val i = Intent(ctx, WalkService::class.java).setAction(ACTION_START)
@@ -148,9 +149,38 @@ class WalkService : Service(), LocationListener {
         }
         main.removeCallbacks(ticker)
         main.post(ticker)
+        // Warn now if battery saver will cut GPS, and again if it gets switched on mid-walk.
+        checkSaver()
+        if (!saverWatch) {
+            val f = android.content.IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(saverReceiver, f, Context.RECEIVER_NOT_EXPORTED)
+            else registerReceiver(saverReceiver, f)
+            saverWatch = true
+        }
+    }
+
+    private var saverWatch = false
+    private val saverReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { checkSaver() }
+    }
+
+    private fun checkSaver() {
+        if (prefs.recording && PowerCheck.hurtsGps(this)) {
+            val open = PendingIntent.getActivity(this, 5, PowerCheck.settingsIntent(),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            nm().notify(ID_SAVER, builder(CH_ALERT).setSmallIcon(R.drawable.ic_paw)
+                .setContentTitle("⚠️ " + PowerCheck.TITLE)
+                .setContentText(PowerCheck.TEXT)
+                .setStyle(Notification.BigTextStyle().bigText(PowerCheck.TEXT))
+                .setContentIntent(open).setAutoCancel(true)
+                .addAction(Notification.Action.Builder(null, "Battery settings", open).build())
+                .build())
+        } else nm().cancel(ID_SAVER)
     }
 
     private fun unlisten() {
+        if (saverWatch) { runCatching { unregisterReceiver(saverReceiver) }; saverWatch = false }
+        nm().cancel(ID_SAVER)
         if (listening) getSystemService(LocationManager::class.java).removeUpdates(this)
         listening = false
         main.removeCallbacks(ticker)

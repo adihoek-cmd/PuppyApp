@@ -167,7 +167,17 @@ class MainActivity : Activity() {
             return
         }
         WalkService.start(this, eventId, family, ts)
-        Toast.makeText(this, "🐾 Recording the route", Toast.LENGTH_SHORT).show()
+        if (PowerCheck.hurtsGps(this)) {
+            // Recording starts anyway; this just makes sure nobody walks off with a gap-filled route.
+            android.app.AlertDialog.Builder(this)
+                .setTitle("⚠️ " + PowerCheck.TITLE)
+                .setMessage(PowerCheck.TEXT)
+                .setPositiveButton("Battery settings") { _, _ -> runCatching { startActivity(PowerCheck.settingsIntent()) } }
+                .setNegativeButton("Record anyway", null)
+                .show()
+        } else {
+            Toast.makeText(this, "🐾 Recording the route", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
