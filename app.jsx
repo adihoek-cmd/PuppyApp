@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.7";
+const APP_VERSION = "2.8";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -277,12 +277,14 @@ function decodePolyline(str) {
 const BASEMAPS = {
   standard: { label: "🗺️ Standard", url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", max: 19,
     attr: "© OpenStreetMap", heat: "#dc2626" },
-  light: { label: "🤍 Light", url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", max: 20,
-    attr: "© OpenStreetMap © CARTO", heat: "#dc2626" },
-  voyager: { label: "🧭 Voyager", url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", max: 20,
-    attr: "© OpenStreetMap © CARTO", heat: "#dc2626" },
-  dark: { label: "🌙 Dark", url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", max: 20,
-    attr: "© OpenStreetMap © CARTO", heat: "#fb923c" },
+  // CARTO's Light/Voyager/Dark now need an API key (else "API KEY REQUIRED" watermark),
+  // so these use Esri's key-free basemaps.
+  light: { label: "🤍 Light", url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", max: 16,
+    attr: "Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap", heat: "#dc2626" },
+  streets: { label: "🧭 Streets", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", max: 19,
+    attr: "Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap", heat: "#dc2626" },
+  dark: { label: "🌙 Dark", url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", max: 16,
+    attr: "Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap", heat: "#fb923c" },
   satellite: { label: "🛰️ Satellite", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", max: 19,
     attr: "Tiles © Esri", heat: "#facc15" },
   topo: { label: "⛰️ Terrain", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", max: 17,
@@ -358,7 +360,7 @@ function loadLeaflet() {
   return leafletPromise;
 }
 // heat = many faint red lines that build up where you walk most; otherwise one green route.
-function RouteMap({ lines, height, interactive, heat, flush, base, pins, fitPad }) {
+function RouteMap({ lines, height, interactive, heat, flush, base, pins, fitPad, zoomButtons = true }) {
   const box = useRef(null), map = useRef(null), layer = useRef(null), tiles = useRef(null);
   const bm = BASEMAPS[base] || BASEMAPS[loadBasemap()];
   const [ready, setReady] = useState(false); // true once this component's own map exists
@@ -367,7 +369,7 @@ function RouteMap({ lines, height, interactive, heat, flush, base, pins, fitPad 
     let dead = false;
     loadLeaflet().then((L) => {
       if (dead || !box.current) return;
-      const m = L.map(box.current, { zoomControl: !!interactive, dragging: !!interactive, touchZoom: !!interactive,
+      const m = L.map(box.current, { zoomControl: !!interactive && zoomButtons, dragging: !!interactive, touchZoom: !!interactive,
         doubleClickZoom: !!interactive, scrollWheelZoom: false, boxZoom: false, keyboard: false });
       map.current = m; layer.current = L.layerGroup().addTo(m); setReady(true);
     }).catch(() => !dead && setFailed(true));
@@ -1636,7 +1638,7 @@ function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, on
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={onClose}>
       <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white shadow-2xl" style={{ paddingBottom: "max(1.75rem, env(safe-area-inset-bottom))" }} onClick={(e) => e.stopPropagation()}>
         <div className="relative">
-          <RouteMap lines={routeLines} height="56vh" interactive={false} flush base={loadBasemap()} pins={pins} fitPad={[84, 104]} />
+          <RouteMap lines={routeLines} height="56vh" interactive zoomButtons={false} flush base={loadBasemap()} pins={pins} fitPad={[84, 104]} />
           <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex items-start justify-between">
             <div className="rounded-xl bg-white/95 px-2.5 py-1.5 shadow-sm">
               <div className="text-sm font-bold text-stone-800">🐾 Walk</div>
