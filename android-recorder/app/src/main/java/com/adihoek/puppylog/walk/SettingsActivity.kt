@@ -119,7 +119,7 @@ class SettingsActivity : Activity() {
     private fun render() {
         if (prefs.recording) {
             val min = (System.currentTimeMillis() - prefs.activeStart) / 60000
-            val m = Track.distanceM(PointFile(this).read())
+            val m = LiveTrack.meters
             val km = if (m >= 1000) "%.2f km".format(m / 1000.0) else "$m m"
             val limit = if (prefs.extended) "no time limit" else "auto-stop at ${Config.AUTO_STOP_MIN} min"
             status.text = "🐾 Walking · $min min · $km\n$limit"

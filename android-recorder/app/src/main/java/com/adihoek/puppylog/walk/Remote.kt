@@ -100,6 +100,25 @@ class Firestore(ctx: Context) {
         if (!r.ok) throw RuntimeException("Couldn't save the route (${r.code}): ${r.body.take(200)}")
     }
 
+    /**
+     * One round trip during a walk: writes the live distance (if any) and returns what the
+     * walk looks like now — durationMin set elsewhere ("End walk" in Puppy Log), -1 if the walk
+     * was deleted, or null if it's still open / couldn't be checked. A PATCH returns the whole
+     * document, so no separate read is needed.
+     */
+    fun syncWalk(family: String, eventId: String, distanceM: Int): Int? {
+        val url = eventsUrl(family) + "/" + Net.enc(eventId)
+        val r = if (distanceM > 0) {
+            val fields = JSONObject().put("distanceM", JSONObject().put("integerValue", distanceM.toString()))
+            Net.request("PATCH", "$url?updateMask.fieldPaths=distanceM&currentDocument.exists=true",
+                JSONObject().put("fields", fields).toString().toByteArray(), auth())
+        } else Net.request("GET", url, null, auth())
+        if (r.code == 404) return -1
+        if (!r.ok) return null
+        val d = JSONObject(r.body).optJSONObject("fields")?.optJSONObject("durationMin") ?: return null
+        return (d.optString("integerValue").ifEmpty { d.optString("doubleValue") }).toDoubleOrNull()?.toInt()
+    }
+
     /** durationMin someone else set on this walk (e.g. "End walk" in the PWA), or null. Missing event → -1. */
     fun externalDuration(family: String, eventId: String): Int? {
         val r = Net.request("GET", eventsUrl(family) + "/" + Net.enc(eventId), null, auth())

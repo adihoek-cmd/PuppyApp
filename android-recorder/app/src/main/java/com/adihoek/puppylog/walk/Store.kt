@@ -73,3 +73,13 @@ class PendingUploads(ctx: Context) {
         return done
     }
 }
+
+/** Running distance of the walk being recorded, shared with the screen (same process). */
+object LiveTrack {
+    @Volatile var event: String = ""
+        private set
+    private var running = Track.Running()
+    val meters: Int @Synchronized get() = running.meters
+    @Synchronized fun reset(eventId: String) { event = eventId; running = Track.Running() }
+    @Synchronized fun add(p: Pt) { running.add(p) }
+}

@@ -56,6 +56,29 @@ object Track {
     }
 
     /**
+     * The same distance as [distanceM], kept as a running total while fixes arrive,
+     * so a live reading never has to re-read and re-smooth the whole walk.
+     */
+    class Running {
+        private val window = ArrayDeque<Pt>()
+        private var anchor: Pt? = null
+        private var total = 0.0
+        val meters: Int get() = total.roundToInt()
+
+        fun add(p: Pt) {
+            if (p.acc > MAX_ACCURACY_M) return
+            window.addLast(p)
+            if (window.size > SMOOTH_N) window.removeFirst()
+            val sp = Pt(p.t, window.sumOf { it.lat } / window.size, window.sumOf { it.lon } / window.size,
+                window.map { it.acc }.average().toFloat(), p.ele)
+            val a = anchor
+            if (a == null) { anchor = sp; return }
+            val d = dist(a, sp)
+            if (d >= maxOf(MIN_STEP_M, sp.acc.toDouble())) { total += d; anchor = sp }
+        }
+    }
+
+    /**
      * For a forgotten walk: the moment you arrived at the place you then stayed.
      * Returns the timestamp of the first fix inside the final resting circle, or null
      * if there's no stationary tail to cut (e.g. the whole track is one spot).

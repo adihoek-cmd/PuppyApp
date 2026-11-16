@@ -234,7 +234,7 @@ class MainActivity : Activity() {
 
         /** Metres walked so far on the walk this phone is recording (0 if none). */
         @JavascriptInterface fun liveDistance(): Int =
-            if (Prefs(this@MainActivity).recording) Track.distanceM(PointFile(this@MainActivity).read()) else 0
+            if (Prefs(this@MainActivity).recording) LiveTrack.meters else 0
 
         /** Event id of the walk being GPS-recorded on this phone, or "". */
         @JavascriptInterface fun recordingEvent(): String = Prefs(this@MainActivity).activeEvent

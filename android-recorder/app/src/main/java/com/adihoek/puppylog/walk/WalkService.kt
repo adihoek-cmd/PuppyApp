@@ -35,6 +35,9 @@ class WalkService : Service(), LocationListener {
         const val ACTION_START = "com.adihoek.puppylog.walk.START"
         const val ACTION_STOP = "com.adihoek.puppylog.walk.STOP"
         const val ACTION_EXTEND = "com.adihoek.puppylog.walk.EXTEND"
+        private const val ACTION_CHECK = "com.adihoek.puppylog.walk.CHECK"
+        // Sync live distance / notice "ended in Puppy Log" this often (each sync wakes the radio).
+        private const val SYNC_MS = 150_000L
         const val EXTRA_EVENT = "event"
         const val EXTRA_FAMILY = "family"
         const val EXTRA_START = "start"
@@ -65,12 +68,14 @@ class WalkService : Service(), LocationListener {
     private var listening = false
     private var finishing = false
     private var lastRemoteCheck = 0L
-    private var wake: PowerManager.WakeLock? = null
+    private var lastNotifiedMin = -1L
 
+    // No wake lock: location fixes wake us when they arrive, and the 2-hour / 150-min
+    // limits are system alarms (below), so the processor can sleep between fixes.
     private val ticker = object : Runnable {
         override fun run() {
             checkLimits()
-            main.postDelayed(this, 30_000)
+            main.postDelayed(this, 60_000)
         }
     }
 
@@ -105,9 +110,15 @@ class WalkService : Service(), LocationListener {
             ACTION_STOP -> if (prefs.recording) { goForeground(); finish(auto = false) } else stopIfIdle()
             ACTION_EXTEND -> if (prefs.recording) {
                 prefs.extended = true
+                cancelGuards()
                 nm().cancel(ID_WARN)
                 goForeground()
             } else stopIfIdle()
+            ACTION_CHECK -> {
+                // The 2-hour / 150-minute alarm. Started as a foreground service, so promote first.
+                goForeground()
+                if (prefs.recording) { listen(); checkLimits() } else stopIfIdle()
+            }
             else -> {
                 // Restarted by the system after being killed: carry on with the saved walk.
                 if (prefs.recording) { goForeground(); listen() } else { stopIfIdle(); return START_NOT_STICKY }
@@ -118,6 +129,7 @@ class WalkService : Service(), LocationListener {
 
     private fun begin(eventId: String, family: String, startTs: Long) {
         points.clear()
+        LiveTrack.reset(eventId)
         prefs.activeEvent = eventId
         prefs.activeFamily = family
         prefs.activeStart = startTs
@@ -143,10 +155,12 @@ class WalkService : Service(), LocationListener {
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 0f, this, Looper.getMainLooper())
             listening = true
         } catch (e: Exception) { /* no GPS provider — the walk still gets its duration */ }
-        if (wake == null) {
-            wake = getSystemService(PowerManager::class.java)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "puppylog:walk").apply { acquire(4 * 3600_000L) }
+        // After a restart, rebuild the running distance once from the saved fixes.
+        if (LiveTrack.event != prefs.activeEvent) {
+            LiveTrack.reset(prefs.activeEvent)
+            points.read().forEach { LiveTrack.add(it) }
         }
+        scheduleGuards()
         main.removeCallbacks(ticker)
         main.post(ticker)
         // Warn now if battery saver will cut GPS, and again if it gets switched on mid-walk.
@@ -184,15 +198,37 @@ class WalkService : Service(), LocationListener {
         if (listening) getSystemService(LocationManager::class.java).removeUpdates(this)
         listening = false
         main.removeCallbacks(ticker)
-        wake?.let { if (it.isHeld) it.release() }
-        wake = null
+        cancelGuards()
+    }
+
+    // ---- 2-hour warning and 150-minute stop as system alarms (no wake lock needed) ----
+    private fun guardIntent(code: Int): PendingIntent =
+        PendingIntent.getForegroundService(this, code, Intent(this, WalkService::class.java).setAction(ACTION_CHECK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+    private fun scheduleGuards() {
+        if (prefs.extended) return
+        val am = getSystemService(android.app.AlarmManager::class.java)
+        val now = System.currentTimeMillis()
+        val warnAt = prefs.activeStart + Config.WARN_MIN * 60_000L
+        val stopAt = prefs.activeStart + Config.AUTO_STOP_MIN * 60_000L
+        // Inexact "while idle" alarms: may come a few minutes late in deep sleep, which is fine here.
+        if (!prefs.warned && warnAt > now) am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, warnAt, guardIntent(6))
+        am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, maxOf(stopAt, now + 1000), guardIntent(7))
+    }
+
+    private fun cancelGuards() {
+        val am = getSystemService(android.app.AlarmManager::class.java)
+        am.cancel(guardIntent(6)); am.cancel(guardIntent(7))
     }
 
     override fun onLocationChanged(loc: Location) {
         if (!prefs.recording || finishing) return
         if (loc.time < prefs.activeStart - 60_000) return
-        points.append(Pt(loc.time, loc.latitude, loc.longitude, if (loc.hasAccuracy()) loc.accuracy else 99f,
-            if (loc.hasAltitude()) loc.altitude else null))
+        val p = Pt(loc.time, loc.latitude, loc.longitude, if (loc.hasAccuracy()) loc.accuracy else 99f,
+            if (loc.hasAltitude()) loc.altitude else null)
+        points.append(p)
+        LiveTrack.add(p)
         checkLimits()
     }
 
@@ -212,12 +248,13 @@ class WalkService : Service(), LocationListener {
             if (m >= Config.WARN_MIN && !prefs.warned) { prefs.warned = true; warn() }
         }
         val now = System.currentTimeMillis()
-        if (now - lastRemoteCheck > 60_000) {
+        if (now - lastRemoteCheck > SYNC_MS) {
             lastRemoteCheck = now
             val fam = prefs.activeFamily; val ev = prefs.activeEvent
+            val meters = LiveTrack.meters
             io.execute {
-                runCatching { Firestore(this).liveDistance(fam, ev, Track.distanceM(points.read())) }
-                val d = try { Firestore(this).externalDuration(fam, ev) } catch (e: Exception) { null }
+                // One request: sends the live distance and reads back whether the walk was ended elsewhere.
+                val d = try { Firestore(this).syncWalk(fam, ev, meters) } catch (e: Exception) { null }
                 if (d != null) main.post {
                     if (prefs.recording && prefs.activeEvent == ev && !finishing) {
                         if (d < 0) abandon() else finish(auto = false, keepDuration = true)
@@ -225,12 +262,13 @@ class WalkService : Service(), LocationListener {
                 }
             }
         }
-        if (m % 5 == 0L) nm().notify(ID_ONGOING, ongoingNotification())
+        if (m % 5 == 0L && m != lastNotifiedMin) { lastNotifiedMin = m; nm().notify(ID_ONGOING, ongoingNotification()) }
     }
 
     /** The walk was deleted from the log — stop quietly, upload nothing. */
     private fun abandon() {
         unlisten()
+        LiveTrack.reset("")
         prefs.clearActive()
         points.clear()
         nm().cancel(ID_WARN)
@@ -254,6 +292,7 @@ class WalkService : Service(), LocationListener {
         val all = points.read()
         prefs.clearActive()
         points.clear()
+        LiveTrack.reset("")
 
         io.execute {
             val end = if (auto) (Track.arrivalTime(all) ?: now) else now
