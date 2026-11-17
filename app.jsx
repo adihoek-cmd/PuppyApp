@@ -11,7 +11,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 // Bump APP_VERSION on every release. Shown in ⚙ Settings so you can confirm
 // at a glance which build a phone is actually running (catches stale caches).
-const APP_VERSION = "2.8";
+const APP_VERSION = "2.9";
 const APP_BUILD = "13 Nov 2026";
 // Inside the Puppy Log Android app the page gets a native bridge (GPS walks, notifications,
 // files). In a normal browser it's undefined and everything works as a plain web app.
@@ -326,6 +326,33 @@ function routePosAt(route, ts) {
   }
   return pts[pts.length - 1];
 }
+function encodePolyline(pts) {
+  let out = "", pLat = 0, pLng = 0;
+  const enc = (v) => { v = v < 0 ? ~(v << 1) : (v << 1); while (v >= 0x20) { out += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; } out += String.fromCharCode(v + 63); };
+  for (const [la, ln] of pts) { const A = Math.round(la * 1e5), G = Math.round(ln * 1e5); enc(A - pLat); enc(G - pLng); pLat = A; pLng = G; }
+  return out;
+}
+function metersBetween(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * r, dLng = (b[1] - a[1]) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+function polylineMeters(pts) { let m = 0; for (let i = 1; i < pts.length; i++) m += metersBetween(pts[i - 1], pts[i]); return m; }
+// Walking path between two points along streets and footpaths (OpenStreetMap, FOSSGIS routing).
+// Falls back to a straight line when the service can't be reached.
+async function walkPath(a, b) {
+  try {
+    const url = "https://routing.openstreetmap.de/routed-foot/route/v1/foot/" + a[1] + "," + a[0] + ";" + b[1] + "," + b[0] + "?overview=full&geometries=geojson";
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(url, { signal: ctl.signal }); clearTimeout(t);
+    const j = await r.json();
+    const c = j.routes && j.routes[0] && j.routes[0].geometry && j.routes[0].geometry.coordinates;
+    if (c && c.length > 1) return { pts: c.map(([lng, lat]) => [lat, lng]), snapped: true };
+  } catch (err) { /* offline or service busy */ }
+  return { pts: [a, b], snapped: false };
+}
+
 const hhmm = (ms) => { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
 // Same day as `baseMs`, at the clock time "HH:MM".
 const atClock = (baseMs, hm) => {
@@ -1486,6 +1513,7 @@ function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatc
   const wantsRoute = !target.isNew && target.type === "walk" && !!famRef;
   const [routeDoc, setRouteDoc] = useState(wantsRoute ? undefined : null);
   const [classic, setClassic] = useState(false); // "Not a walk? Change type" → the regular form
+  const [routeTool, setRouteTool] = useState(null); // "draw" | "copy" — add a route by hand
   useEffect(() => {
     if (!wantsRoute) return;
     let dead = false;
@@ -1498,6 +1526,8 @@ function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatc
           tt: r.tt ? String(r.tt).split(",").map(Number) : null,
           ts: Number(r.ts) || target.ts,
           durationMin: Number(r.durationMin) || target.durationMin || 0,
+          distanceM: Number(r.distanceM) || 0,
+          manual: !!r.manual,
         } : null);
       })
       .catch(() => !dead && setRouteDoc(null));
@@ -1518,11 +1548,34 @@ function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatc
   if (routeDoc === undefined) {
     return <Sheet title="Walk" onClose={onClose}><div className="py-10 text-center text-sm text-stone-400">Loading the route…</div></Sheet>;
   }
+  // A route added by hand (drawn or copied): saved like a recorded one, marked manual, no per-point times.
+  const saveManualRoute = (pts, extra) => {
+    const distanceM = Math.round(polylineMeters(pts));
+    const doc = { pts: encodePolyline(pts), ts: target.ts, durationMin: Number(target.durationMin) || 0,
+      distanceM, by: target.by || "Someone", manual: true, ...(extra || {}) };
+    famRef.collection("routes").doc(target.id).set(doc);
+    if (distanceM > 0) famRef.collection("events").doc(target.id).update({ distanceM });
+    setRouteDoc({ pts, tt: null, ts: doc.ts, durationMin: doc.durationMin, distanceM, manual: true });
+    setRouteTool(null);
+    setClassic(false);
+  };
+  const toolUi = routeTool === "draw" ? (
+    <RouteDrawer famRef={famRef} onCancel={() => setRouteTool(null)}
+      onDone={(pts) => saveManualRoute(pts)} />
+  ) : routeTool === "copy" ? (
+    <RoutePicker famRef={famRef} excludeId={target.id} onCancel={() => setRouteTool(null)}
+      onPick={(r) => saveManualRoute(r.pts, { copiedFrom: r.id })} />
+  ) : null;
+
   if (routeDoc && route && route.length > 1 && !classic) {
     return (
-      <WalkSheet target={target} routeDoc={routeDoc} routeLines={routeLines} kids={walkKids || []} customTypes={customTypes}
-        onSave={onSave} onDelete={onDelete} onClose={onClose} onChangeType={() => setClassic(true)}
-        onEditOneOff={onEditOneOff} onPatchEvent={onPatchEvent} onRemoveEvent={onRemoveEvent} />
+      <>
+        <WalkSheet target={target} routeDoc={routeDoc} routeLines={routeLines} kids={walkKids || []} customTypes={customTypes}
+          onSave={onSave} onDelete={onDelete} onClose={onClose} onChangeType={() => setClassic(true)}
+          onRedraw={routeDoc.manual ? () => setRouteTool("draw") : null}
+          onEditOneOff={onEditOneOff} onPatchEvent={onPatchEvent} onRemoveEvent={onRemoveEvent} />
+        {toolUi}
+      </>
     );
   }
 
@@ -1599,6 +1652,14 @@ function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatc
             </div>
           </div>
 
+          {/* No route (not recorded): add one by hand */}
+          {!target.isNew && famRef && !(route && route.length > 1) ? (
+            <div className="mb-4 grid grid-cols-2 gap-2">
+              <button onClick={() => setRouteTool("draw")} className="rounded-xl border border-emerald-200 bg-emerald-50 py-2.5 text-sm font-semibold text-emerald-700 active:bg-emerald-100">✏️ Draw route</button>
+              <button onClick={() => setRouteTool("copy")} className="rounded-xl border border-emerald-200 bg-emerald-50 py-2.5 text-sm font-semibold text-emerald-700 active:bg-emerald-100">🔁 Same route as…</button>
+            </div>
+          ) : null}
+
           {/* The walk's route (GPS walks from the Android app): full sheet width, ~¼ of the screen high. */}
           {route && route.length > 1 ? (
             <div className="-mx-5 mb-3">
@@ -1613,15 +1674,16 @@ function EditSheet({ target, customTypes, famRef, walkKids, onEditOneOff, onPatc
         <button onClick={save} className="flex-1 rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">{isNew ? "Add" : "Save changes"}</button>
         {onDelete && <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete">🗑️</button>}
       </div>
+      {toolUi}
     </Sheet>
   );
 }
 
 // ---- Walk with a GPS route: map first, pins for what happened on the walk ----
-function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, onDelete, onClose, onChangeType, onEditOneOff, onPatchEvent, onRemoveEvent }) {
+function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, onDelete, onClose, onChangeType, onRedraw, onEditOneOff, onPatchEvent, onRemoveEvent }) {
   const [start, setStart] = useState(target.ts);
   const [dur, setDur] = useState(Number(target.durationMin) || routeDoc.durationMin || 0);
-  const [dist, setDist] = useState(Number(target.distanceM) || 0);
+  const [dist, setDist] = useState(Number(target.distanceM) || routeDoc.distanceM || 0);
   const [popup, setPopup] = useState(null); // "time" | "dist" | { pin: event }
   const pins = useMemo(() => kids.map((e) => {
     const pos = routePosAt(routeDoc, e.ts);
@@ -1643,6 +1705,7 @@ function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, on
             <div className="rounded-xl bg-white/95 px-2.5 py-1.5 shadow-sm">
               <div className="text-sm font-bold text-stone-800">🐾 Walk</div>
               <div className="text-xs text-stone-600">{dateLbl} · {hhmm(start)}{target.by ? " · " + target.by : ""}</div>
+              {routeDoc.manual ? <div className="text-[11px] font-semibold text-amber-700">✏️ route added by hand</div> : null}
             </div>
             <button onClick={onClose} className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-stone-600 shadow-sm" aria-label="Close">✕</button>
           </div>
@@ -1663,7 +1726,10 @@ function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, on
         </div>
 
         <div className="px-5 pt-3">
-          <button onClick={onChangeType} className="py-2 text-sm font-semibold text-amber-700">Not a walk? Change type</button>
+          <div className="flex items-center justify-between">
+            <button onClick={onChangeType} className="py-2 text-sm font-semibold text-amber-700">Not a walk? Change type</button>
+            {onRedraw ? <button onClick={onRedraw} className="py-2 text-sm font-semibold text-emerald-700">✏️ Redraw route</button> : null}
+          </div>
           <div className="mt-2 flex items-center gap-2">
             <button onClick={save} className="flex-1 rounded-xl bg-amber-600 py-3 text-sm font-bold text-white active:bg-amber-700">Save changes</button>
             {onDelete && <button onClick={onDelete} className="rounded-xl bg-red-50 px-4 py-3 text-red-500 active:bg-red-100" aria-label="Delete walk">🗑️</button>}
@@ -1684,6 +1750,138 @@ function WalkSheet({ target, routeDoc, routeLines, kids, customTypes, onSave, on
           onDelete={() => { onRemoveEvent(popup.pin.id); setPopup(null); }} />
       )}
     </div>
+  );
+}
+
+// ---- Add a route by hand: draw it (taps joined along streets) ----
+function RouteDrawer({ famRef, onCancel, onDone }) {
+  usePopupBack(onCancel);
+  const box = useRef(null), map = useRef(null), layer = useRef(null);
+  const [wps, setWps] = useState([]);       // tapped points
+  const [segs, setSegs] = useState([]);     // path between consecutive taps
+  const [follow, setFollow] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [straight, setStraight] = useState(false); // a segment fell back to a straight line
+  const st = useRef({ wps, follow, busy });
+  st.current = { wps, follow, busy };
+
+  const addPoint = async (p) => {
+    const { wps: w, follow: f, busy: b } = st.current;
+    if (b) return;
+    if (!w.length) { setWps([p]); return; }
+    const last = w[w.length - 1];
+    let seg = { pts: [last, p], snapped: false };
+    if (f) { setBusy(true); seg = await walkPath(last, p); setBusy(false); if (!seg.snapped) setStraight(true); }
+    setWps((x) => [...x, p]);
+    setSegs((x) => [...x, seg.pts]);
+  };
+  const undo = () => {
+    if (busy) return;
+    setWps((x) => x.slice(0, -1));
+    setSegs((x) => x.slice(0, -1));
+  };
+  const closeLoop = () => { if (wps.length > 1) addPoint(wps[0]); };
+
+  useEffect(() => {
+    let dead = false;
+    loadLeaflet().then((L) => {
+      if (dead || !box.current) return;
+      const bm = BASEMAPS[loadBasemap()];
+      const m = L.map(box.current, { zoomControl: true });
+      L.tileLayer(bm.url, { maxZoom: bm.max, attribution: bm.attr, subdomains: "abc" }).addTo(m);
+      layer.current = L.layerGroup().addTo(m);
+      map.current = m;
+      m.on("click", (e) => addPoint([e.latlng.lat, e.latlng.lng]));
+      m.setView([31.77, 35.21], 14);
+      // Start where you usually walk: the area of recent routes.
+      famRef.collection("routes").orderBy("ts", "desc").limit(15).get().then((snap) => {
+        const all = [];
+        snap.docs.forEach((d) => all.push(...decodePolyline(d.data().pts || "")));
+        if (!dead && all.length) m.fitBounds(L.latLngBounds(all), { padding: [30, 30], maxZoom: 17 });
+      }).catch(() => {});
+      setTimeout(() => m.invalidateSize(), 60);
+    }).catch(() => {});
+    return () => { dead = true; if (map.current) { map.current.remove(); map.current = null; } };
+  }, []);
+
+  useEffect(() => {
+    const L = window.L;
+    if (!L || !layer.current) return;
+    layer.current.clearLayers();
+    segs.forEach((pts) => L.polyline(pts, { color: "#059669", weight: 5, opacity: 0.9, lineCap: "round", lineJoin: "round" }).addTo(layer.current));
+    // Drawn last-to-first so the green start dot stays on top after "Back to start".
+    wps.map((p, i) => [p, i]).reverse().forEach(([p, i]) => L.circleMarker(p, { radius: i === 0 ? 7 : 5, color: "#fff", weight: 2,
+      fillColor: i === 0 ? "#059669" : "#44403c", fillOpacity: 1, interactive: false }).addTo(layer.current));
+  }, [wps, segs]);
+
+  const pts = segs.reduce((acc, s, i) => acc.concat(i ? s.slice(1) : s), []);
+  const meters = polylineMeters(pts);
+  return (
+    <div className="fixed inset-0 z-[70] flex flex-col bg-white" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-2 border-b border-stone-200 px-3 py-2" style={{ paddingTop: "max(0.5rem, env(safe-area-inset-top))" }}>
+        <button onClick={onCancel} className="rounded-xl px-3 py-2 text-sm font-semibold text-stone-600 active:bg-stone-100">Cancel</button>
+        <div className="flex-1 text-center">
+          <div className="text-sm font-bold text-stone-800">Draw the route</div>
+          <div className="text-xs text-stone-500">{busy ? "Finding the path…" : pts.length > 1 ? fmtDist(Math.round(meters)) : "Tap where you walked"}</div>
+        </div>
+        <button onClick={() => pts.length > 1 && onDone(pts)} disabled={pts.length < 2 || busy}
+          className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-bold text-white active:bg-amber-700 disabled:opacity-40">Done</button>
+      </div>
+      <div className="relative isolate flex-1 bg-stone-100"><div ref={box} className="absolute inset-0" /></div>
+      <div className="border-t border-stone-200 px-3 pt-2" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+        {straight && follow ? <div className="mb-1.5 text-center text-[11px] text-amber-700">Couldn't reach the street-matching service — some parts are straight lines.</div> : null}
+        <div className="grid grid-cols-3 gap-2">
+          <button onClick={undo} disabled={!wps.length || busy} className="rounded-xl bg-stone-100 py-2.5 text-sm font-semibold text-stone-700 disabled:opacity-40">↶ Undo</button>
+          <button onClick={closeLoop} disabled={wps.length < 2 || busy} className="rounded-xl bg-stone-100 py-2.5 text-sm font-semibold text-stone-700 disabled:opacity-40">⟲ Back to start</button>
+          <button onClick={() => setFollow(!follow)} className={"rounded-xl py-2.5 text-sm font-semibold " + (follow ? "bg-emerald-500 text-white" : "bg-stone-100 text-stone-600")}>{follow ? "✓ Follow streets" : "Straight lines"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Small drawing of a route for the picker (no map tiles needed).
+function RouteThumb({ pts, size = 64 }) {
+  if (!pts || pts.length < 2) return <div style={{ width: size, height: size }} className="rounded-lg bg-stone-100" />;
+  let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+  for (const [la, ln] of pts) { a = Math.min(a, la); b = Math.max(b, la); c = Math.min(c, ln); d = Math.max(d, ln); }
+  const k = Math.cos(((a + b) / 2) * Math.PI / 180);
+  const w = Math.max((d - c) * k, 1e-6), h = Math.max(b - a, 1e-6), s = (size - 10) / Math.max(w, h);
+  const ox = (size - w * s) / 2, oy = (size - h * s) / 2;
+  const path = pts.map(([la, ln], i) => (i ? "L" : "M") + (ox + (ln - c) * k * s).toFixed(1) + " " + (oy + (b - la) * s).toFixed(1)).join(" ");
+  return (
+    <svg width={size} height={size} viewBox={"0 0 " + size + " " + size} className="shrink-0 rounded-lg bg-stone-100" aria-hidden="true">
+      <path d={path} fill="none" stroke="#059669" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ---- Add a route by hand: copy an earlier walk's route ----
+function RoutePicker({ famRef, excludeId, onCancel, onPick }) {
+  const [list, setList] = useState(null);
+  useEffect(() => {
+    famRef.collection("routes").orderBy("ts", "desc").limit(25).get()
+      .then((snap) => setList(snap.docs.filter((d) => d.id !== excludeId).slice(0, 12)
+        .map((d) => ({ id: d.id, ...d.data(), pts: decodePolyline(d.data().pts || "") })).filter((r) => r.pts.length > 1)))
+      .catch(() => setList([]));
+  }, []);
+  return (
+    <Popup title="Same route as…" onClose={onCancel}>
+      <div className="-mx-1 max-h-[60vh] space-y-1.5 overflow-y-auto px-1">
+        {list === null ? <div className="py-6 text-center text-sm text-stone-400">Loading routes…</div>
+          : !list.length ? <div className="py-6 text-center text-sm text-stone-400">No earlier routes yet.</div>
+          : list.map((r) => (
+            <button key={r.id} onClick={() => onPick(r)} className="flex w-full items-center gap-3 rounded-xl border border-stone-200 p-2 text-left active:bg-stone-50">
+              <RouteThumb pts={r.pts} />
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-stone-800">{new Date(Number(r.ts)).toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short" })} · {hhmm(Number(r.ts))}</div>
+                <div className="text-xs text-stone-500">{fmtDist(Number(r.distanceM) || Math.round(polylineMeters(r.pts)))}{r.by ? " · " + r.by : ""}{r.manual ? " · ✏️" : ""}</div>
+              </div>
+            </button>
+          ))}
+      </div>
+      <button onClick={onCancel} className="mt-3 w-full rounded-xl bg-stone-100 py-3 text-sm font-semibold text-stone-600">Cancel</button>
+    </Popup>
   );
 }
 
